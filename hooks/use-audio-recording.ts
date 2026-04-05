@@ -7,7 +7,7 @@ import {
   AudioQuality,
   type RecordingOptions,
 } from 'expo-audio';
-import { File, Paths } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system';
 
 // 16 kHz mono LinearPCM WAV — matches Whisper's expected input format.
 // Android MediaRecorder has no native WAV encoder; 'default'/'default' records
@@ -86,23 +86,33 @@ export function useAudioRecording() {
     const waveformSamples = [...waveformSamplesRef.current];
     waveformSamplesRef.current = [];
 
-    await recorder.stop();
-    const tempUri = recorder.uri;
+    // Capture the URI before stop() — this is set at prepareToRecordAsync time
+    // and points to the file iOS is actively writing to.
+    const fileUri = recorder.uri;
+
+    await new Promise<void>((resolve) => {
+      const sub = recorder.addListener('recordingStatusUpdate', (status) => {
+        if (status.isFinished || status.hasError) {
+          sub.remove();
+          resolve();
+        }
+      });
+      recorder.stop();
+    });
+
     setIsRecording(false);
+    if (!fileUri) return null;
 
-    if (!tempUri) return null;
-
-    const filename = `recording_${Date.now()}.wav`;
-    const destFile = new File(Paths.document, filename);
-    try {
-      await new File(tempUri).copy(destFile);
-    } catch {
-      return null;
+    // Poll until iOS flushes audio data beyond the 4096-byte CAF skeleton.
+    for (let i = 0; i < 20; i++) {
+      const info = await FileSystem.getInfoAsync(fileUri);
+      if (info.exists && 'size' in info && (info.size as number) > 4096) break;
+      await new Promise(resolve => setTimeout(resolve, 200));
     }
 
     return {
-      uri: destFile.uri,
-      filename,
+      uri: fileUri,
+      filename: fileUri.split('/').pop() ?? `recording_${Date.now()}.caf`,
       duration: Math.round(durationMs / 1000),
       waveform: JSON.stringify(waveformSamples),
       steps: stepCount,
