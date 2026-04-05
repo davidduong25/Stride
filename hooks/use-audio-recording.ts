@@ -7,7 +7,7 @@ import {
   AudioQuality,
   type RecordingOptions,
 } from 'expo-audio';
-import * as FileSystem from 'expo-file-system';
+import { File } from 'expo-file-system';
 
 // 16 kHz mono LinearPCM WAV — matches Whisper's expected input format.
 // Android MediaRecorder has no native WAV encoder; 'default'/'default' records
@@ -104,11 +104,13 @@ export function useAudioRecording() {
     if (!fileUri) return null;
 
     // Poll until iOS flushes audio data beyond the 4096-byte CAF skeleton.
+    let ready = false;
     for (let i = 0; i < 20; i++) {
-      const info = await FileSystem.getInfoAsync(fileUri);
-      if (info.exists && 'size' in info && (info.size as number) > 4096) break;
+      const file = new File(fileUri);
+      if (file.exists && file.size > 4096) { ready = true; break; }
       await new Promise(resolve => setTimeout(resolve, 200));
     }
+    if (!ready) return null;
 
     return {
       uri: fileUri,

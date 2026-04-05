@@ -35,8 +35,6 @@ import {
   LLAMA3_2_1B_TOKENIZER,
   LLAMA3_2_TOKENIZER_CONFIG,
 } from 'react-native-executorch';
-import * as FileSystem from 'expo-file-system';
-import { Audio } from 'expo-av';
 
 import { useRecordingsContext } from './recordings-context';
 
@@ -91,27 +89,72 @@ function parseTags(response: string): Tag[] {
 // Audio decoder — reads a saved audio file and returns a PCM float32 array
 // ---------------------------------------------------------------------------
 
-async function decodeAudioToPCM(uri: string): Promise<number[]> {
-  // Validate the file is a loadable audio asset via expo-av
-  const { sound } = await Audio.Sound.createAsync({ uri }, { shouldPlay: false });
-  await sound.unloadAsync();
-
-  // Read raw bytes via expo-file-system
-  const base64 = await FileSystem.readAsStringAsync(uri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  const view = new DataView(bytes.buffer);
-  // Skip 44-byte WAV header; decode little-endian Int16 samples to float32 [-1, 1]
+function extractInt16PCM(view: DataView, start: number, end: number): number[] {
   const pcm: number[] = [];
-  for (let i = 44; i + 1 < bytes.length; i += 2) {
-    pcm.push(view.getInt16(i, true) / 32768);
+  for (let i = start; i + 1 < end; i += 2) {
+    pcm.push(view.getInt16(i, true) / 32768); // little-endian Int16 → float32 [-1,1]
   }
   return pcm;
+}
+
+async function decodeAudioToPCM(uri: string): Promise<number[]> {
+  // fetch() handles file:// URIs reliably across path formats on React Native
+  let raw: Uint8Array | null = null;
+  for (let i = 0; i < 10; i++) {
+    const res = await fetch(uri);
+    const ab = await res.arrayBuffer();
+    if (ab.byteLength > 4096) { raw = new Uint8Array(ab); break; }
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  if (!raw || raw.byteLength <= 4096) {
+    throw new Error(`Audio file not ready after retries: ${raw?.byteLength ?? 0} bytes at ${uri}`);
+  }
+  const buffer = raw.buffer;
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+
+  if (bytes.length < 8) throw new Error(`File too small: ${bytes.length} bytes`);
+  const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+
+  if (magic === 'RIFF') {
+    // WAV — walk RIFF chunks to find 'data'
+    if (bytes.length < 12) throw new Error('WAV file truncated');
+    let offset = 12;
+    let dataOffset = -1, dataSize = 0;
+    while (offset + 8 <= bytes.length) {
+      const id = String.fromCharCode(bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]);
+      const size = view.getUint32(offset + 4, true);
+      if (id === 'data') { dataOffset = offset + 8; dataSize = size; break; }
+      offset += 8 + size + (size % 2);
+    }
+    if (dataOffset === -1) throw new Error('No data chunk in WAV');
+    return extractInt16PCM(view, dataOffset, Math.min(dataOffset + dataSize, bytes.length));
+  }
+
+  if (magic === 'caff') {
+    let offset = 8;
+    const log: string[] = [];
+    while (offset + 12 <= bytes.length) {
+      const id = String.fromCharCode(bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]);
+      const sizeHigh = view.getInt32(offset + 4, false);
+      const sizeLow  = view.getUint32(offset + 8, false);
+      const streaming = sizeHigh < 0;
+      const size = streaming ? 0 : (sizeHigh * 0x100000000 + sizeLow);
+      log.push(`${id}(${streaming ? 'stream' : size})`);
+      if (id === 'data') {
+        const dataStart = offset + 12 + 4;
+        const dataEnd = streaming ? bytes.length : Math.min(offset + 12 + size, bytes.length);
+        const pcm = extractInt16PCM(view, dataStart, dataEnd);
+        if (pcm.length === 0) throw new Error(`CAF data empty: start=${dataStart} end=${dataEnd} file=${bytes.length} chunks=[${log.join(',')}]`);
+        return pcm;
+      }
+      if (streaming) break;
+      offset += 12 + size;
+    }
+    throw new Error(`No CAF data chunk: file=${bytes.length}b chunks=[${log.join(',')}]`);
+  }
+
+  throw new Error(`Unsupported audio format: "${magic}"`);
 }
 
 // ---------------------------------------------------------------------------
@@ -119,39 +162,74 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
 // ---------------------------------------------------------------------------
 
 function TranscriptionWorker({
-  recordingId,
-  uri,
+  job,
   onDone,
+  onProgress,
+  onReady,
+  onError,
 }: {
-  recordingId: string;
-  uri: string;
+  job: TranscribeJob | null;
   onDone: (recordingId: string, transcript: string) => void;
+  onProgress: (progress: number) => void;
+  onReady: (ready: boolean) => void;
+  onError: (err: string) => void;
 }) {
-  const { transcribe, isReady, isTranscribing, transcription } = useSpeechToText({
+  const { transcribe, isReady, isGenerating, sequence, downloadProgress, error } = useSpeechToText({
     modelName: 'whisper',
     encoderSource: WHISPER_TINY_ENCODER,
     decoderSource: WHISPER_TINY_DECODER,
     tokenizerSource: WHISPER_TOKENIZER,
   });
-  const startedRef = useRef(false);
-  const wasTranscribingRef = useRef(false);
+  // Capture job ID when transcription starts — never rely on the job prop
+  // at completion time since React 18 batching can null it out in the same render
+  const pendingIdRef = useRef<string | null>(null);
+  const wasGeneratingRef = useRef(false);
+  const sequenceRef = useRef('');
+  sequenceRef.current = sequence;
 
   useEffect(() => {
-    if (!isReady || startedRef.current) return;
-    startedRef.current = true;
+    onProgress(downloadProgress);
+  }, [downloadProgress, onProgress]);
+
+  useEffect(() => {
+    onReady(isReady);
+  }, [isReady, onReady]);
+
+  useEffect(() => {
+    if (error) onError(error.message ?? String(error));
+  }, [error, onError]);
+
+  useEffect(() => {
+    if (!isReady || !job || pendingIdRef.current === job.recordingId) return;
+    pendingIdRef.current = job.recordingId;
+    const id = job.recordingId;
     (async () => {
-      const pcm = await decodeAudioToPCM(uri);
-      transcribe(pcm);
+      try {
+        const pcm = await decodeAudioToPCM(job.uri);
+        if (pcm.length === 0) {
+          onError('WAV decode produced empty PCM — check file at: ' + job.uri);
+          pendingIdRef.current = null;
+          onDone(id, '');
+          return;
+        }
+        transcribe(pcm);
+      } catch (e) {
+        onError(e instanceof Error ? e.message : String(e));
+        pendingIdRef.current = null;
+        onDone(id, '');
+      }
     })();
-  }, [isReady, transcribe, uri]);
+  }, [isReady, job, transcribe, onDone, onError]);
 
   useEffect(() => {
-    if (isTranscribing) { wasTranscribingRef.current = true; return; }
-    if (wasTranscribingRef.current) {
-      wasTranscribingRef.current = false;
-      onDone(recordingId, transcription ?? '');
+    if (isGenerating) { wasGeneratingRef.current = true; return; }
+    if (wasGeneratingRef.current && pendingIdRef.current) {
+      const id = pendingIdRef.current;
+      pendingIdRef.current = null;
+      wasGeneratingRef.current = false;
+      onDone(id, sequenceRef.current);
     }
-  }, [isTranscribing, transcription, recordingId, onDone]);
+  }, [isGenerating, onDone]);
 
   return null;
 }
@@ -173,20 +251,26 @@ function LLMWorker({
   });
   const startedRef = useRef(false);
   const wasGeneratingRef = useRef(false);
+  const pendingIdRef = useRef<string | null>(null);
+  const responseRef = useRef('');
+  responseRef.current = response ?? '';
 
   useEffect(() => {
     if (!isReady || startedRef.current) return;
     startedRef.current = true;
+    pendingIdRef.current = recordingId;
     forward(transcript);
-  }, [isReady, forward, transcript]);
+  }, [isReady, forward, transcript, recordingId]);
 
   useEffect(() => {
     if (isGenerating) { wasGeneratingRef.current = true; return; }
-    if (wasGeneratingRef.current) {
+    if (wasGeneratingRef.current && pendingIdRef.current) {
+      const id = pendingIdRef.current;
+      pendingIdRef.current = null;
       wasGeneratingRef.current = false;
-      onDone(recordingId, response ?? '');
+      onDone(id, responseRef.current);
     }
-  }, [isGenerating, response, recordingId, onDone]);
+  }, [isGenerating, onDone]);
 
   return null;
 }
@@ -199,6 +283,9 @@ type AIQueueCtx = {
   enqueueTranscription: (recordingId: string, uri: string) => void;
   processingId: string | null;
   processingType: 'transcribe' | 'tag' | null;
+  modelDownloadProgress: number;
+  isModelReady: boolean;
+  modelError: string | null;
   suggestedTagsMap: Record<string, Tag[]>;
   acceptSuggestion: (recordingId: string, tags: Tag[]) => Promise<void>;
   dismissSuggestion: (recordingId: string) => void;
@@ -210,10 +297,27 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   const { updateRecording } = useRecordingsContext();
   const [queue, dispatch] = useReducer(queueReducer, { active: null, pending: [] });
   const [suggestedTagsMap, setSuggestedTagsMap] = useState<Record<string, Tag[]>>({});
+  const [modelDownloadProgress, setModelDownloadProgress] = useState(0);
+  const [isModelReady, setIsModelReady] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
 
   // Ref so memoised callbacks always call the latest dispatch without re-memoising
   const dispatchRef = useRef(dispatch);
   dispatchRef.current = dispatch;
+
+  const handleError = useCallback(
+    (err: string) => {
+      setModelError(err);
+      // Mark the active job's recording as failed and advance the queue so
+      // subsequent recordings are not permanently blocked.
+      const active = queue.active;
+      if (active) {
+        updateRecording(active.recordingId, { transcript: '' });
+        dispatchRef.current({ type: 'NEXT' });
+      }
+    },
+    [queue.active, updateRecording]
+  );
 
   const handleTranscriptionDone = useCallback(
     async (recordingId: string, transcript: string) => {
@@ -254,6 +358,9 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
     enqueueTranscription,
     processingId: queue.active?.recordingId ?? null,
     processingType: queue.active?.type ?? null,
+    modelDownloadProgress,
+    isModelReady,
+    modelError,
     suggestedTagsMap,
     acceptSuggestion,
     dismissSuggestion,
@@ -262,14 +369,13 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   return (
     <AIQueueContext.Provider value={value}>
       {children}
-      {queue.active?.type === 'transcribe' && (
-        <TranscriptionWorker
-          key={queue.active.recordingId + '-transcribe'}
-          recordingId={queue.active.recordingId}
-          uri={queue.active.uri}
-          onDone={handleTranscriptionDone}
-        />
-      )}
+      <TranscriptionWorker
+        job={queue.active?.type === 'transcribe' ? queue.active : null}
+        onDone={handleTranscriptionDone}
+        onProgress={setModelDownloadProgress}
+        onReady={setIsModelReady}
+        onError={handleError}
+      />
       {queue.active?.type === 'tag' && (
         <LLMWorker
           key={queue.active.recordingId + '-tag'}

@@ -59,10 +59,10 @@ export function useRecordings() {
   }, []);
 
   async function addRecording(entry: Omit<RecordingEntry, 'id' | 'date'>): Promise<string | undefined> {
-    if (!dbRef.current) return;
+    if (!dbRef.current) throw new Error('Database not ready — try again in a moment');
     const newEntry: RecordingEntry = {
       ...entry,
-      id: Date.now().toString(),
+      id: Date.now().toString() + Math.random().toString(36).slice(2),
       date: new Date().toISOString(),
     };
     await dbRef.current.runAsync(

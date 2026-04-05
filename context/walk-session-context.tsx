@@ -6,6 +6,7 @@ import React, {
   useState,
   type PropsWithChildren,
 } from 'react';
+import { Pedometer } from 'expo-sensors';
 
 export type WalkSessionSnapshot = {
   startedAt: number;
@@ -18,7 +19,7 @@ type WalkSessionCtx = {
   isSessionActive: boolean;
   startSession: (currentStepCount: number) => void;
   addRecordingToSession: (recordingId: string) => void;
-  endSession: (currentStepCount: number) => WalkSessionSnapshot | null;
+  endSession: (currentStepCount: number) => Promise<WalkSessionSnapshot | null>;
 };
 
 const WalkSessionContext = createContext<WalkSessionCtx | null>(null);
@@ -41,19 +42,27 @@ export function WalkSessionProvider({ children }: PropsWithChildren) {
     recordingIdsRef.current = [...recordingIdsRef.current, recordingId];
   }, []);
 
-  const endSession = useCallback((currentStepCount: number): WalkSessionSnapshot | null => {
+  const endSession = useCallback(async (currentStepCount: number): Promise<WalkSessionSnapshot | null> => {
     if (startedAtRef.current === null) return null;
-    const snapshot: WalkSessionSnapshot = {
-      startedAt: startedAtRef.current,
-      endedAt: Date.now(),
-      stepCount: Math.max(0, currentStepCount - stepCountAtStartRef.current),
-      recordingIds: [...recordingIdsRef.current],
-    };
+    const startedAt = startedAtRef.current;
+    const endedAt = Date.now();
+    const fallbackSteps = Math.max(0, currentStepCount - stepCountAtStartRef.current);
+    const recordingIds = [...recordingIdsRef.current];
+
     startedAtRef.current = null;
     stepCountAtStartRef.current = 0;
     recordingIdsRef.current = [];
     setIsSessionActive(false);
-    return snapshot;
+
+    // Query iOS Health for the authoritative step count over the session window.
+    // Falls back to subscription-relative count if HealthKit is unavailable.
+    let stepCount = fallbackSteps;
+    try {
+      const result = await Pedometer.getStepCountAsync(new Date(startedAt), new Date(endedAt));
+      stepCount = result.steps;
+    } catch { /* keep fallback */ }
+
+    return { startedAt, endedAt, stepCount, recordingIds };
   }, []);
 
   return (
