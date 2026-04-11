@@ -14,6 +14,7 @@ import { C } from '@/constants/theme';
 import { useRecordingsContext } from '@/context/recordings-context';
 import { useSessionsContext, type SessionEntry } from '@/context/sessions-context';
 import { IconSymbol } from '@/components/ui/icon-symbol';
+import { EllipsisMenu } from '@/components/EllipsisMenu';
 
 // ---------------------------------------------------------------------------
 // Types & constants
@@ -176,9 +177,7 @@ export default function WalksScreen() {
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.title}>walks</Text>
-        <Pressable hitSlop={12}>
-          <IconSymbol name="ellipsis" size={20} color={C.icon} />
-        </Pressable>
+        <EllipsisMenu />
       </View>
 
       {/* Time filter */}

@@ -60,6 +60,7 @@ export default function RootLayout() {
               <Stack>
                 <Stack.Screen name="(tabs)"       options={{ headerShown: false }} />
                 <Stack.Screen name="onboarding"   options={{ headerShown: false, gestureEnabled: false }} />
+                <Stack.Screen name="settings"     options={{ headerShown: true, title: 'Settings', headerBackTitle: 'Back' }} />
                 <Stack.Screen name="walk-summary" options={{ headerShown: true, title: 'Walk Summary', headerBackTitle: 'Done' }} />
               </Stack>
               <StatusBar style="light" />

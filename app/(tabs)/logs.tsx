@@ -12,6 +12,7 @@ import { useRouter } from 'expo-router';
 
 import { C } from '@/constants/theme';
 import { useSessionsContext, type SessionEntry } from '@/context/sessions-context';
+import { EllipsisMenu } from '@/components/EllipsisMenu';
 import { useRecordingsContext } from '@/context/recordings-context';
 import { useAIQueue } from '@/context/ai-queue-context';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -334,9 +335,7 @@ export default function LogsScreen() {
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.title}>logs</Text>
-        <Pressable hitSlop={12}>
-          <IconSymbol name="ellipsis" size={20} color={C.icon} />
-        </Pressable>
+        <EllipsisMenu />
       </View>
 
       <ScrollView

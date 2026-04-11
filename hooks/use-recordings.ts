@@ -106,10 +106,18 @@ export function useRecordings() {
     await dbRef.current.runAsync('DELETE FROM recordings WHERE id = ?', [id]);
     setRecordings(prev => prev.filter(r => r.id !== id));
     if (entry) {
-      try { new File(entry.uri).delete(); }
-      catch (e) { console.warn('[momentum] Failed to delete recording file:', e); }
+      try { new File(entry.uri).delete(); } catch { /* file already gone */ }
     }
   }
 
-  return { recordings, addRecording, updateRecording, deleteRecording };
+  async function clearAllRecordings() {
+    if (!dbRef.current) return;
+    for (const r of recordings) {
+      try { new File(r.uri).delete(); } catch { /* file already gone */ }
+    }
+    await dbRef.current.runAsync('DELETE FROM recordings');
+    setRecordings([]);
+  }
+
+  return { recordings, addRecording, updateRecording, deleteRecording, clearAllRecordings };
 }

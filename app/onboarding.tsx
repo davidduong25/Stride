@@ -8,7 +8,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { C } from '@/constants/theme';
@@ -44,7 +44,10 @@ const SLIDES = [
 ] as const;
 
 export default function OnboardingScreen() {
-  const router    = useRouter();
+  const router  = useRouter();
+  const { replay } = useLocalSearchParams<{ replay?: string }>();
+  const isReplay   = replay === 'true';
+
   const scrollRef = useRef<ScrollView>(null);
   const [index, setIndex] = useState(0);
 
@@ -59,6 +62,10 @@ export default function OnboardingScreen() {
   }
 
   async function finish() {
+    if (isReplay) {
+      router.back();
+      return;
+    }
     await AsyncStorage.setItem('momentum.hasOnboarded', 'true');
     router.replace('/(tabs)');
   }
