@@ -4,6 +4,7 @@ import {
   Pressable,
   SafeAreaView,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -88,6 +89,7 @@ function ClipRow({
   onSeek,
   onRetranscribe,
   onSave,
+  onDelete,
 }: {
   item:            RecordingEntry;
   index:           number;
@@ -101,6 +103,7 @@ function ClipRow({
   onSeek:          (ms: number) => void;
   onRetranscribe:  (id: string) => void;
   onSave:          (id: string, text: string) => void;
+  onDelete:        (id: string) => void;
 }) {
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [editing, setEditing]               = useState(false);
@@ -133,17 +136,22 @@ function ClipRow({
               : formatDuration(item.duration)}
           </Text>
         </View>
-        <Pressable
-          style={[clipStyles.playBtn, isActive && clipStyles.playBtnActive]}
-          onPress={() => onPlay(item.id)}
-          hitSlop={8}
-        >
-          <IconSymbol
-            name={isActive ? 'pause.fill' : 'play.fill'}
-            size={12}
-            color={isActive ? C.background : C.textSecondary}
-          />
-        </Pressable>
+        <View style={clipStyles.headerRight}>
+          <Pressable
+            style={[clipStyles.playBtn, isActive && clipStyles.playBtnActive]}
+            onPress={() => onPlay(item.id)}
+            hitSlop={8}
+          >
+            <IconSymbol
+              name={isActive ? 'pause.fill' : 'play.fill'}
+              size={12}
+              color={isActive ? C.background : C.textSecondary}
+            />
+          </Pressable>
+          <Pressable onPress={() => onDelete(item.id)} hitSlop={8}>
+            <IconSymbol name="trash" size={14} color={C.textTertiary} />
+          </Pressable>
+        </View>
       </View>
 
       {/* Waveform scrubber — only when active */}
@@ -246,6 +254,11 @@ const clipStyles = StyleSheet.create({
     alignItems:    'center',
     gap:            8,
   },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems:    'center',
+    gap:           12,
+  },
   label: {
     fontSize:   14,
     fontWeight: '500',
@@ -331,7 +344,7 @@ export default function WalkSummaryScreen() {
     recordingIds: string;
   }>();
 
-  const { recordings, updateRecording } = useRecordingsContext();
+  const { recordings, updateRecording, deleteRecording } = useRecordingsContext();
   const { sessions }                    = useSessionsContext();
   const {
     enqueueTranscription,
@@ -520,6 +533,62 @@ export default function WalkSummaryScreen() {
     await doRetranscribe();
   }
 
+  async function handleDelete(id: string) {
+    Alert.alert(
+      'Delete clip?',
+      'This permanently removes the recording and its transcript.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            if (playingId === id) await stopCurrentPlayback();
+            await deleteRecording(id);
+          },
+        },
+      ]
+    );
+  }
+
+  // ── share ────────────────────────────────────────────────────────────────────
+
+  async function handleShare() {
+    const lines: string[] = [];
+
+    lines.push(session?.title ?? new Date(startedAt).toLocaleDateString(undefined, {
+      weekday: 'long', month: 'long', day: 'numeric',
+    }));
+
+    const meta: string[] = [];
+    if (durationMs > 0) meta.push(formatDurationShort(durationMs));
+    if (steps > 0)      meta.push(`${steps.toLocaleString()} steps`);
+    if (sessionRecordings.length > 0)
+      meta.push(`${sessionRecordings.length} thought${sessionRecordings.length !== 1 ? 's' : ''}`);
+    if (meta.length > 0) lines.push(meta.join(' · '));
+
+    if (keyPoints.length > 0) {
+      lines.push('', 'KEY POINTS');
+      keyPoints.forEach(p => lines.push(`• ${p}`));
+    }
+
+    if (actions.length > 0) {
+      lines.push('', 'ACTIONS');
+      actions.forEach(a => lines.push(`☐ ${a}`));
+    }
+
+    const transcripts = sessionRecordings
+      .filter(r => r.transcript?.trim())
+      .map((r, i) => `[${i + 1}] ${normaliseTranscript(r.transcript!)}`);
+
+    if (transcripts.length > 0) {
+      lines.push('', 'THOUGHTS');
+      transcripts.forEach(t => lines.push(t));
+    }
+
+    await Share.share({ message: lines.join('\n').trim() });
+  }
+
   // ── date label ───────────────────────────────────────────────────────────────
 
   const dateLabel = startedAt
@@ -534,8 +603,13 @@ export default function WalkSummaryScreen() {
     <>
       <Stack.Screen
         options={{
-          title:          session?.title ?? 'Walk',
+          title:           session?.title ?? 'Walk',
           headerBackTitle: 'Done',
+          headerRight: () => (
+            <Pressable onPress={handleShare} hitSlop={12}>
+              <IconSymbol name="square.and.arrow.up" size={20} color={C.tint} />
+            </Pressable>
+          ),
         }}
       />
       <SafeAreaView style={styles.safe}>
@@ -652,6 +726,7 @@ export default function WalkSummaryScreen() {
                   onSeek={handleSeek}
                   onRetranscribe={handleRetranscribe}
                   onSave={handleSave}
+                  onDelete={handleDelete}
                 />
               ))}
             </View>

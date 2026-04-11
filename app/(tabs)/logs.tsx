@@ -1,4 +1,5 @@
 import {
+  Alert,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -86,9 +87,10 @@ type CardProps = {
   recordingCount: number;
   isAnalyzing:    boolean;
   onPress:        () => void;
+  onLongPress:    () => void;
 };
 
-function SessionCard({ session, durationMs, recordingCount, isAnalyzing, onPress }: CardProps) {
+function SessionCard({ session, durationMs, recordingCount, isAnalyzing, onPress, onLongPress }: CardProps) {
   const keyPoints = parseJsonArray(session.key_points);
   const actions   = parseJsonArray(session.actions);
   const hasAI     = session.title !== null;
@@ -97,7 +99,7 @@ function SessionCard({ session, durationMs, recordingCount, isAnalyzing, onPress
   const preview = keyPoints[0] ?? null;
 
   return (
-    <Pressable style={cardStyles.card} onPress={onPress}>
+    <Pressable style={cardStyles.card} onPress={onPress} onLongPress={onLongPress}>
       {/* Top row: title + duration */}
       <View style={cardStyles.topRow}>
         <Text style={cardStyles.title} numberOfLines={1}>
@@ -234,9 +236,20 @@ const cardStyles = StyleSheet.create({
 
 export default function LogsScreen() {
   const router                      = useRouter();
-  const { sessions }                = useSessionsContext();
+  const { sessions, deleteSession } = useSessionsContext();
   const { recordings }              = useRecordingsContext();
   const { analyzingSessionId }      = useAIQueue();
+
+  function confirmDeleteSession(session: SessionEntry) {
+    Alert.alert(
+      'Delete walk?',
+      'Removes this walk and its AI summary. Recorded thoughts are kept.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => deleteSession(session.id) },
+      ]
+    );
+  }
 
   function openSession(session: SessionEntry) {
     // Find recordings that fall within this session's time window
@@ -291,6 +304,7 @@ export default function LogsScreen() {
                 recordingCount={sessionRecordings.length}
                 isAnalyzing={analyzingSessionId === session.id}
                 onPress={() => openSession(session)}
+                onLongPress={() => confirmDeleteSession(session)}
               />
             );
           })

@@ -25,6 +25,7 @@ import React, {
   useState,
   type PropsWithChildren,
 } from 'react';
+import * as Notifications from 'expo-notifications';
 import {
   useSpeechToText,
   useLLM,
@@ -601,6 +602,12 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
         key_points: keyPoints.length > 0 ? JSON.stringify(keyPoints) : null,
         actions:    actions.length   > 0 ? JSON.stringify(actions)   : null,
       });
+      if (title) {
+        Notifications.scheduleNotificationAsync({
+          content: { title: 'Walk summary ready', body: title },
+          trigger: null,
+        });
+      }
       dispatchRef.current({ type: 'NEXT' });
     },
     [updateSession]

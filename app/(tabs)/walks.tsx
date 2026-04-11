@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import {
+  Alert,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -106,7 +107,7 @@ const chipStyles = StyleSheet.create({
 export default function WalksScreen() {
   const router = useRouter();
   const { recordings }  = useRecordingsContext();
-  const { sessions }    = useSessionsContext();
+  const { sessions, deleteSession } = useSessionsContext();
   const [filter, setFilter] = useState<TimeFilter>('day');
 
   const filtered         = filterSessions(sessions, filter);
@@ -138,6 +139,17 @@ export default function WalksScreen() {
       .flatMap(r => (r.tags ? r.tags.split(',') : []))
       .filter(Boolean);
     return [...new Set(all)];
+  }
+
+  function confirmDeleteSession(session: SessionEntry) {
+    Alert.alert(
+      'Delete walk?',
+      'Removes this walk and its AI summary. Recorded thoughts are kept.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => deleteSession(session.id) },
+      ]
+    );
   }
 
   function openSession(session: SessionEntry) {
@@ -206,6 +218,7 @@ export default function WalksScreen() {
               <Pressable
                 style={styles.featuredCard}
                 onPress={() => openSession(latestSession)}
+                onLongPress={() => confirmDeleteSession(latestSession)}
               >
                 <View style={styles.featuredCardHeader}>
                   {latestSession.title
@@ -258,6 +271,7 @@ export default function WalksScreen() {
                       key={session.id}
                       style={styles.sessionRow}
                       onPress={() => openSession(session)}
+                      onLongPress={() => confirmDeleteSession(session)}
                     >
                       {session.title ? (
                         <>

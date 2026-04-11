@@ -73,5 +73,11 @@ export function useSessions() {
     setSessions(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
   }
 
-  return { sessions, addSession, updateSession };
+  async function deleteSession(id: string): Promise<void> {
+    if (!dbRef.current) return;
+    await dbRef.current.runAsync('DELETE FROM sessions WHERE id = ?', [id]);
+    setSessions(prev => prev.filter(s => s.id !== id));
+  }
+
+  return { sessions, addSession, updateSession, deleteSession };
 }

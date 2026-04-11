@@ -219,14 +219,14 @@ export default function HomeScreen() {
     await pendingSaveRef.current;
     if (!isSessionActiveRef.current) return;
     const snapshot = await endSession(stepCountRef.current);
-    if (snapshot && snapshot.recordingIds.length > 0) {
+    if (snapshot) {
       await addSession({
         id: snapshot.startedAt.toString(),
         started_at: snapshot.startedAt,
         ended_at:   snapshot.endedAt,
         steps:      snapshot.stepCount,
       });
-      navigateToSummary(snapshot);
+      if (snapshot.recordingIds.length > 0) navigateToSummary(snapshot);
     }
   }, [isRecording, handleStopRecording, endSession, stepCountRef, addSession, navigateToSummary]);
 
@@ -251,14 +251,14 @@ export default function HomeScreen() {
         await pendingSaveRef.current;
         if (cancelled || !isSessionActiveRef.current) return;
         const snapshot = await endSession(stepCountRef.current);
-        if (snapshot && snapshot.recordingIds.length > 0) {
+        if (snapshot) {
           await addSession({
             id: snapshot.startedAt.toString(),
             started_at: snapshot.startedAt,
             ended_at:   snapshot.endedAt,
             steps:      snapshot.stepCount,
           });
-          navigateToSummary(snapshot);
+          if (snapshot.recordingIds.length > 0) navigateToSummary(snapshot);
         }
       })();
       return () => { cancelled = true; };
