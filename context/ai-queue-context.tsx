@@ -25,7 +25,6 @@ import React, {
   useState,
   type PropsWithChildren,
 } from 'react';
-import * as Notifications from 'expo-notifications';
 import {
   useSpeechToText,
   useLLM,
@@ -603,10 +602,13 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
         actions:    actions.length   > 0 ? JSON.stringify(actions)   : null,
       });
       if (title) {
-        Notifications.scheduleNotificationAsync({
-          content: { title: 'Walk summary ready', body: title },
-          trigger: null,
-        });
+        try {
+          const Notifications = require('expo-notifications');
+          Notifications.scheduleNotificationAsync({
+            content: { title: 'Walk summary ready', body: title },
+            trigger: null,
+          });
+        } catch { /* native module not available in this build */ }
       }
       dispatchRef.current({ type: 'NEXT' });
     },

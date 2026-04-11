@@ -2,18 +2,9 @@ import { useEffect } from 'react';
 import { DarkTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import * as Notifications from 'expo-notifications';
 import 'react-native-reanimated';
 
 import { C } from '@/constants/theme';
-
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: false,
-    shouldSetBadge:  false,
-  }),
-});
 import { RecordingsProvider } from '@/context/recordings-context';
 import { SessionsProvider } from '@/context/sessions-context';
 import { AIQueueProvider } from '@/context/ai-queue-context';
@@ -40,7 +31,17 @@ export const unstable_settings = {
 
 export default function RootLayout() {
   useEffect(() => {
-    Notifications.requestPermissionsAsync();
+    try {
+      const Notifications = require('expo-notifications');
+      Notifications.setNotificationHandler({
+        handleNotification: async () => ({
+          shouldShowAlert: true,
+          shouldPlaySound: false,
+          shouldSetBadge:  false,
+        }),
+      });
+      Notifications.requestPermissionsAsync();
+    } catch { /* native module not available in this build */ }
   }, []);
 
   return (
