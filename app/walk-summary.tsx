@@ -1,24 +1,34 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
-  FlatList,
+  Alert,
   Pressable,
+  SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import type { AudioPlayer, AudioStatus } from 'expo-audio';
-import { Svg, Rect, Line } from 'react-native-svg';
+import { File } from 'expo-file-system';
 
+import { C } from '@/constants/theme';
+import { WaveformScrubber } from '@/components/WaveformScrubber';
+import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useRecordingsContext, type RecordingEntry } from '@/context/recordings-context';
+import { useSessionsContext } from '@/context/sessions-context';
+import { useAIQueue } from '@/context/ai-queue-context';
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-function formatDuration(totalSeconds: number): string {
-  const h = Math.floor(totalSeconds / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-  const s = totalSeconds % 60;
+function formatDuration(totalSec: number): string {
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
   if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
@@ -27,169 +37,362 @@ function formatMs(ms: number): string {
   return formatDuration(Math.round(ms / 1000));
 }
 
-function normaliseDb(db: number, maxHeight: number): number {
-  const FLOOR = -60;
-  const clamped = Math.max(FLOOR, Math.min(0, db));
-  return Math.max(2, ((clamped - FLOOR) / -FLOOR) * maxHeight);
+function formatDurationShort(ms: number): string {
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m} min`;
 }
 
-// ── WaveformBar ───────────────────────────────────────────────────────────────
-
-function WaveformBar({
-  samples,
-  positionMs,
-  durationMs,
-  onSeek,
-}: {
-  samples: number[];
-  positionMs: number;
-  durationMs: number;
-  onSeek: (ms: number) => void;
-}) {
-  const [containerWidth, setContainerWidth] = useState(0);
-  const HEIGHT = 48;
-  const BAR_COUNT = Math.min(samples.length, 100);
-  const step = samples.length / BAR_COUNT;
-  const bars = Array.from({ length: BAR_COUNT }, (_, i) =>
-    samples[Math.round(i * step)] ?? -60
-  );
-  const playedFraction = durationMs > 0 ? positionMs / durationMs : 0;
-  const w = containerWidth || 1;
-
-  function handlePress(e: { nativeEvent: { locationX: number } }) {
-    if (durationMs === 0 || !containerWidth) return;
-    const fraction = Math.max(0, Math.min(1, e.nativeEvent.locationX / containerWidth));
-    onSeek(fraction * durationMs);
+function parseJsonArray(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const arr = JSON.parse(json);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
   }
-
-  return (
-    <Pressable
-      onPress={handlePress}
-      onLayout={e => setContainerWidth(e.nativeEvent.layout.width)}
-      style={{ height: HEIGHT, marginVertical: 4 }}
-    >
-      <Svg width={w} height={HEIGHT}>
-        {bars.map((db, i) => {
-          const barW = w / BAR_COUNT;
-          const bh = normaliseDb(db, HEIGHT - 8);
-          const played = i / BAR_COUNT <= playedFraction;
-          return (
-            <Rect
-              key={i}
-              x={i * barW + 1}
-              y={(HEIGHT - bh) / 2}
-              width={Math.max(1, barW - 2)}
-              height={bh}
-              fill={played ? '#007AFF' : '#C7C7CC'}
-              rx={1}
-            />
-          );
-        })}
-        <Line
-          x1={playedFraction * w}
-          y1={0}
-          x2={playedFraction * w}
-          y2={HEIGHT}
-          stroke="#007AFF"
-          strokeWidth={2}
-        />
-      </Svg>
-    </Pressable>
-  );
 }
 
-// ── RecordingItem ─────────────────────────────────────────────────────────────
+function normaliseTranscript(text: string): string {
+  const t = text.trim();
+  if (!t) return t;
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
 
-type LoadedSound = { player: AudioPlayer; durationMs: number; sub: { remove: () => void } | null };
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
-function RecordingItem({
+type LoadedSound = {
+  player:     AudioPlayer;
+  durationMs: number;
+  sub:        { remove: () => void } | null;
+};
+
+// ---------------------------------------------------------------------------
+// ClipRow
+// ---------------------------------------------------------------------------
+
+function ClipRow({
   item,
   index,
   isActive,
   positionMs,
   durationMs,
+  isTranscribing,
+  isQueued,
+  isFailed,
   onPlay,
   onSeek,
+  onRetranscribe,
+  onSave,
 }: {
-  item: RecordingEntry;
-  index: number;
-  isActive: boolean;
-  positionMs: number;
-  durationMs: number;
-  onPlay: (id: string) => void;
-  onSeek: (ms: number) => void;
+  item:            RecordingEntry;
+  index:           number;
+  isActive:        boolean;
+  positionMs:      number;
+  durationMs:      number;
+  isTranscribing:  boolean;
+  isQueued:        boolean;
+  isFailed:        boolean;
+  onPlay:          (id: string) => void;
+  onSeek:          (ms: number) => void;
+  onRetranscribe:  (id: string) => void;
+  onSave:          (id: string, text: string) => void;
 }) {
-  const waveformSamples = item.waveform ? (JSON.parse(item.waveform) as number[]) : null;
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
+  const [editing, setEditing]               = useState(false);
+  const [editText, setEditText]             = useState('');
+
+  const waveformSamples  = item.waveform ? (JSON.parse(item.waveform) as number[]) : null;
   const displayDurationMs = isActive && durationMs > 0 ? durationMs : item.duration * 1000;
 
+  function startEditing() {
+    setEditText(item.transcript ?? '');
+    setEditing(true);
+  }
+
+  function commitEdit() {
+    onSave(item.id, editText.trim());
+    setEditing(false);
+  }
+
+  const hasTranscript = item.transcript !== null && item.transcript.trim().length > 0;
+
   return (
-    <View style={styles.clipRow}>
-      <View style={styles.clipHeader}>
-        <Text style={styles.clipTitle}>Clip {index + 1}</Text>
-        <Text style={styles.clipDuration}>
-          {isActive
-            ? `${formatMs(positionMs)} / ${formatMs(displayDurationMs)}`
-            : formatDuration(item.duration)}
-        </Text>
+    <View style={clipStyles.row}>
+      {/* Header: clip label + duration + play button */}
+      <View style={clipStyles.header}>
+        <View style={clipStyles.headerLeft}>
+          <Text style={clipStyles.label}>Clip {index + 1}</Text>
+          <Text style={clipStyles.duration}>
+            {isActive
+              ? `${formatMs(positionMs)} / ${formatMs(displayDurationMs)}`
+              : formatDuration(item.duration)}
+          </Text>
+        </View>
+        <Pressable
+          style={[clipStyles.playBtn, isActive && clipStyles.playBtnActive]}
+          onPress={() => onPlay(item.id)}
+          hitSlop={8}
+        >
+          <IconSymbol
+            name={isActive ? 'pause.fill' : 'play.fill'}
+            size={12}
+            color={isActive ? C.background : C.textSecondary}
+          />
+        </Pressable>
       </View>
 
+      {/* Waveform scrubber — only when active */}
       {isActive && waveformSamples && waveformSamples.length > 0 && (
-        <WaveformBar
+        <WaveformScrubber
           samples={waveformSamples}
           positionMs={positionMs}
           durationMs={durationMs}
           onSeek={onSeek}
+          height={40}
+          maxBars={80}
+          marginVertical={6}
         />
       )}
 
-      <Pressable
-        style={[styles.playButton, isActive && styles.playButtonActive]}
-        onPress={() => onPlay(item.id)}
-      >
-        <Text style={[styles.playButtonText, isActive && styles.playButtonTextActive]}>
-          {isActive ? 'Pause' : 'Play'}
-        </Text>
-      </Pressable>
+      {/* Transcript toggle */}
+      {(hasTranscript || isTranscribing || isQueued || isFailed) && (
+        <Pressable
+          style={clipStyles.transcriptToggle}
+          onPress={() => !editing && setTranscriptOpen(o => !o)}
+        >
+          <IconSymbol
+            name={transcriptOpen ? 'chevron.down' : 'chevron.right'}
+            size={11}
+            color={C.textTertiary}
+          />
+          <Text style={clipStyles.transcriptToggleText}>
+            {isTranscribing ? 'Transcribing…'
+              : isQueued     ? 'Queued…'
+              : isFailed     ? 'Failed'
+              : 'Transcript'}
+          </Text>
+          {isFailed && (
+            <Pressable
+              onPress={() => onRetranscribe(item.id)}
+              hitSlop={8}
+              style={clipStyles.retryBtn}
+            >
+              <Text style={clipStyles.retryText}>Retry</Text>
+            </Pressable>
+          )}
+        </Pressable>
+      )}
+
+      {/* Transcript body */}
+      {transcriptOpen && hasTranscript && !editing && (
+        <View style={clipStyles.transcriptBody}>
+          <Text style={clipStyles.transcriptText}>
+            {normaliseTranscript(item.transcript!)}
+          </Text>
+          <View style={clipStyles.transcriptActions}>
+            <Pressable onPress={startEditing} hitSlop={6}>
+              <Text style={clipStyles.transcriptAction}>Edit</Text>
+            </Pressable>
+            <Pressable onPress={() => onRetranscribe(item.id)} hitSlop={6}>
+              <Text style={clipStyles.transcriptAction}>Retranscribe</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      {/* Edit mode */}
+      {transcriptOpen && editing && (
+        <View style={clipStyles.transcriptBody}>
+          <TextInput
+            style={clipStyles.transcriptInput}
+            value={editText}
+            onChangeText={setEditText}
+            multiline
+            autoFocus
+            scrollEnabled={false}
+          />
+          <View style={clipStyles.transcriptActions}>
+            <Pressable onPress={commitEdit} hitSlop={6}>
+              <Text style={clipStyles.transcriptAction}>Save</Text>
+            </Pressable>
+            <Pressable onPress={() => setEditing(false)} hitSlop={6}>
+              <Text style={[clipStyles.transcriptAction, { color: C.textTertiary }]}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
 
-// ── WalkSummaryScreen ─────────────────────────────────────────────────────────
+const clipStyles = StyleSheet.create({
+  row: {
+    paddingVertical:  14,
+    borderTopWidth:   StyleSheet.hairlineWidth,
+    borderTopColor:   C.border,
+  },
+  header: {
+    flexDirection:  'row',
+    justifyContent: 'space-between',
+    alignItems:     'center',
+  },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems:    'center',
+    gap:            8,
+  },
+  label: {
+    fontSize:   14,
+    fontWeight: '500',
+    color:      C.text,
+  },
+  duration: {
+    fontSize: 13,
+    color:    C.textSecondary,
+  },
+  playBtn: {
+    width:           28,
+    height:          28,
+    borderRadius:    14,
+    backgroundColor: C.surfaceHigh,
+    justifyContent:  'center',
+    alignItems:      'center',
+  },
+  playBtnActive: {
+    backgroundColor: C.tint,
+  },
+  transcriptToggle: {
+    flexDirection: 'row',
+    alignItems:    'center',
+    gap:            4,
+    marginTop:      8,
+  },
+  transcriptToggleText: {
+    fontSize: 12,
+    color:    C.textTertiary,
+  },
+  retryBtn: {
+    marginLeft: 6,
+  },
+  retryText: {
+    fontSize: 12,
+    color:    C.tint,
+  },
+  transcriptBody: {
+    marginTop: 8,
+    gap:        6,
+  },
+  transcriptText: {
+    fontSize:   14,
+    color:      C.textSecondary,
+    lineHeight: 21,
+  },
+  transcriptInput: {
+    fontSize:          14,
+    color:             C.text,
+    lineHeight:        21,
+    borderWidth:       1,
+    borderColor:       C.border,
+    borderRadius:      8,
+    padding:           10,
+    minHeight:         80,
+    textAlignVertical: 'top',
+    backgroundColor:   C.surfaceHigh,
+  },
+  transcriptActions: {
+    flexDirection: 'row',
+    gap:            16,
+  },
+  transcriptAction: {
+    fontSize: 12,
+    color:    C.tint,
+  },
+});
+
+// ---------------------------------------------------------------------------
+// WalkSummaryScreen
+// ---------------------------------------------------------------------------
 
 export default function WalkSummaryScreen() {
   const {
-    startedAt: startedAtStr,
-    endedAt: endedAtStr,
-    steps: stepsStr,
+    startedAt:    startedAtStr,
+    endedAt:      endedAtStr,
+    steps:        stepsStr,
     recordingIds: recordingIdsStr,
   } = useLocalSearchParams<{
-    startedAt: string;
-    endedAt: string;
-    steps: string;
+    startedAt:    string;
+    endedAt:      string;
+    steps:        string;
     recordingIds: string;
   }>();
 
-  const { recordings } = useRecordingsContext();
+  const { recordings, updateRecording } = useRecordingsContext();
+  const { sessions }                    = useSessionsContext();
+  const {
+    enqueueTranscription,
+    enqueueAnalysis,
+    processingId,
+    processingType,
+    failedIds,
+    queuedIds,
+    analyzingSessionId,
+  } = useAIQueue();
 
-  const startedAt = Number(startedAtStr ?? 0);
-  const endedAt = Number(endedAtStr ?? 0);
-  const steps = Number(stepsStr ?? 0);
+  const startedAt    = Number(startedAtStr ?? 0);
+  const endedAt      = Number(endedAtStr   ?? 0);
+  const steps        = Number(stepsStr     ?? 0);
   const recordingIds = recordingIdsStr ? recordingIdsStr.split(',').filter(Boolean) : [];
+  const sessionId    = startedAtStr ?? '';
 
-  const sessionDurationSec = Math.round((endedAt - startedAt) / 1000);
+  const durationMs   = endedAt - startedAt;
 
-  // Preserve session recording order (not sorted by date)
   const sessionRecordings = recordingIds
     .map(id => recordings.find(r => r.id === id))
     .filter((r): r is RecordingEntry => r !== undefined);
 
-  // ── playback ──────────────────────────────────────────────────────────────
+  const session     = sessions.find(s => s.id === sessionId);
+  const keyPoints   = parseJsonArray(session?.key_points ?? null);
+  const actions     = parseJsonArray(session?.actions    ?? null);
+  const hasAI       = session?.title !== null && session?.title !== undefined;
+  const isAnalyzing = analyzingSessionId === sessionId;
 
-  const [playingId, setPlayingId] = useState<string | null>(null);
+  const allTranscribed =
+    sessionRecordings.length > 0 &&
+    sessionRecordings.every(
+      r => r.transcript !== null && !queuedIds.has(r.id) && processingId !== r.id
+    );
+
+  const hasNonEmptyTranscripts = sessionRecordings.some(
+    r => r.transcript && r.transcript.trim().length > 0
+  );
+
+  // ── auto-trigger analysis ───────────────────────────────────────────────────
+
+  const [autoTriggered, setAutoTriggered] = useState(false);
+
+  useEffect(() => {
+    if (autoTriggered || !allTranscribed || !hasNonEmptyTranscripts || hasAI || isAnalyzing) return;
+    const transcripts = sessionRecordings
+      .map(r => r.transcript)
+      .filter((t): t is string => !!t && t.trim().length > 0);
+    if (transcripts.length === 0) return;
+    setAutoTriggered(true);
+    enqueueAnalysis(sessionId, transcripts);
+  }, [autoTriggered, allTranscribed, hasNonEmptyTranscripts, hasAI, isAnalyzing,
+      sessionRecordings, sessionId, enqueueAnalysis]);
+
+  // ── playback ────────────────────────────────────────────────────────────────
+
+  const [playingId,  setPlayingId]  = useState<string | null>(null);
   const [positionMs, setPositionMs] = useState(0);
-  const [durationMs, setDurationMs] = useState(0);
-  const soundMapRef = useRef<Map<string, LoadedSound>>(new Map());
-  const activeIdRef = useRef<string | null>(null);
+  const [durationMsState, setDurationMs] = useState(0);
+  const soundMapRef  = useRef<Map<string, LoadedSound>>(new Map());
+  const activeIdRef  = useRef<string | null>(null);
 
   useEffect(() => {
     setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
@@ -199,17 +402,18 @@ export default function WalkSummaryScreen() {
     };
   }, []);
 
-  const loadSound = useCallback((entry: RecordingEntry): LoadedSound | null => {
+  function loadSound(entry: RecordingEntry): LoadedSound | null {
     if (soundMapRef.current.has(entry.id)) return soundMapRef.current.get(entry.id)!;
+    if (!new File(entry.uri).exists) return null;
     try {
-      const player = createAudioPlayer({ uri: entry.uri });
+      const player = createAudioPlayer(entry.uri, { updateInterval: 100 });
       const loaded: LoadedSound = { player, durationMs: player.duration * 1000, sub: null };
       soundMapRef.current.set(entry.id, loaded);
       return loaded;
     } catch {
       return null;
     }
-  }, []);
+  }
 
   async function stopCurrentPlayback() {
     const id = activeIdRef.current;
@@ -229,26 +433,42 @@ export default function WalkSummaryScreen() {
   }
 
   async function handlePlay(id: string) {
-    if (playingId === id) {
-      await stopCurrentPlayback();
-      return;
-    }
-
+    if (playingId === id) { await stopCurrentPlayback(); return; }
     await stopCurrentPlayback();
 
     const entry = sessionRecordings.find(r => r.id === id);
     if (!entry) return;
 
     const loaded = loadSound(entry);
-    if (!loaded) return;
+    if (!loaded) {
+      Alert.alert('Recording unavailable', 'The audio file for this recording is missing.');
+      return;
+    }
 
     activeIdRef.current = id;
     setPlayingId(id);
     setPositionMs(0);
-    setDurationMs(loaded.durationMs);
+    setDurationMs(loaded.player.duration * 1000);
+
+    let loadTimeout: ReturnType<typeof setTimeout>;
+
+    function abortPlayback(message: string) {
+      clearTimeout(loadTimeout);
+      loaded.sub?.remove();
+      loaded.sub = null;
+      soundMapRef.current.delete(id);
+      activeIdRef.current = null;
+      setPlayingId(null); setPositionMs(0); setDurationMs(0);
+      Alert.alert('Playback failed', message);
+    }
+
+    loadTimeout = setTimeout(() => {
+      if (activeIdRef.current === id) abortPlayback('This recording could not be loaded.');
+    }, 5000);
 
     loaded.sub = loaded.player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
       if (!status.isLoaded) return;
+      clearTimeout(loadTimeout);
       if (status.duration > 0) {
         setDurationMs(status.duration * 1000);
         loaded.durationMs = status.duration * 1000;
@@ -257,9 +477,7 @@ export default function WalkSummaryScreen() {
         loaded.sub?.remove();
         loaded.sub = null;
         activeIdRef.current = null;
-        setPlayingId(null);
-        setPositionMs(0);
-        setDurationMs(0);
+        setPlayingId(null); setPositionMs(0); setDurationMs(0);
         return;
       }
       setPositionMs(status.currentTime * 1000);
@@ -275,155 +493,316 @@ export default function WalkSummaryScreen() {
     }
   }
 
-  // ── render ────────────────────────────────────────────────────────────────
+  async function handleSave(id: string, text: string) {
+    await updateRecording(id, { transcript: text, transcript_edited: 1 });
+  }
 
-  const sessionDate = startedAt
+  async function handleRetranscribe(id: string) {
+    const entry = sessionRecordings.find(r => r.id === id);
+    if (!entry) return;
+
+    async function doRetranscribe() {
+      await updateRecording(id, { transcript: null, transcript_edited: 0 });
+      enqueueTranscription(id, entry!.uri);
+    }
+
+    if (entry.transcript_edited) {
+      Alert.alert(
+        'Replace your edits?',
+        'Retranscribing will overwrite the changes you made to this transcript.',
+        [
+          { text: 'Cancel',       style: 'cancel' },
+          { text: 'Retranscribe', style: 'destructive', onPress: doRetranscribe },
+        ]
+      );
+      return;
+    }
+    await doRetranscribe();
+  }
+
+  // ── date label ───────────────────────────────────────────────────────────────
+
+  const dateLabel = startedAt
     ? new Date(startedAt).toLocaleDateString(undefined, {
-        weekday: 'long',
-        month: 'short',
-        day: 'numeric',
+        weekday: 'long', month: 'long', day: 'numeric',
       })
     : '';
 
+  // ── render ───────────────────────────────────────────────────────────────────
+
   return (
     <>
-      <Stack.Screen options={{ title: 'Walk Summary', headerBackTitle: 'Done' }} />
-      <View style={styles.container}>
-        {sessionDate ? <Text style={styles.dateText}>{sessionDate}</Text> : null}
+      <Stack.Screen
+        options={{
+          title:          session?.title ?? 'Walk',
+          headerBackTitle: 'Done',
+        }}
+      />
+      <SafeAreaView style={styles.safe}>
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Date */}
+          {dateLabel ? (
+            <Text style={styles.dateLabel}>{dateLabel}</Text>
+          ) : null}
 
-        <View style={styles.statsRow}>
-          <View style={styles.statCard}>
-            <Text style={styles.statValue}>{formatDuration(sessionDurationSec)}</Text>
-            <Text style={styles.statLabel}>Duration</Text>
-          </View>
-          <View style={styles.statDivider} />
-          <View style={styles.statCard}>
-            <Text style={styles.statValue}>{steps.toLocaleString()}</Text>
-            <Text style={styles.statLabel}>Steps</Text>
-          </View>
-          <View style={styles.statDivider} />
-          <View style={styles.statCard}>
-            <Text style={styles.statValue}>{sessionRecordings.length}</Text>
-            <Text style={styles.statLabel}>Clips</Text>
-          </View>
-        </View>
-
-        <FlatList
-          data={sessionRecordings}
-          keyExtractor={item => item.id}
-          renderItem={({ item, index }) => (
-            <RecordingItem
-              item={item}
-              index={index}
-              isActive={playingId === item.id}
-              positionMs={positionMs}
-              durationMs={durationMs}
-              onPlay={handlePlay}
-              onSeek={handleSeek}
-            />
+          {/* AI title — shown below date when present */}
+          {hasAI && (
+            <Text style={styles.aiTitle}>{session!.title}</Text>
           )}
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyText}>No recordings this walk.</Text>
+
+          {/* Stats strip */}
+          <View style={styles.statsRow}>
+            <View style={styles.statItem}>
+              <Text style={styles.statValue}>{formatDurationShort(durationMs)}</Text>
+              <Text style={styles.statLabel}>duration</Text>
             </View>
-          }
-          contentContainerStyle={styles.listContent}
-        />
-      </View>
+            <View style={styles.statDivider} />
+            <View style={styles.statItem}>
+              <Text style={styles.statValue}>{steps.toLocaleString()}</Text>
+              <Text style={styles.statLabel}>steps</Text>
+            </View>
+            <View style={styles.statDivider} />
+            <View style={styles.statItem}>
+              <Text style={styles.statValue}>{sessionRecordings.length}</Text>
+              <Text style={styles.statLabel}>thoughts</Text>
+            </View>
+          </View>
+
+          {/* ── AI Output ───────────────────────────────────────────────────── */}
+
+          {isAnalyzing && (
+            <View style={styles.processingCard}>
+              <Text style={styles.processingText}>Analyzing your walk…</Text>
+            </View>
+          )}
+
+          {autoTriggered && !isAnalyzing && !hasAI && allTranscribed && hasNonEmptyTranscripts && (
+            <Pressable
+              style={styles.analyzeBtn}
+              onPress={() => {
+                const transcripts = sessionRecordings
+                  .map(r => r.transcript)
+                  .filter((t): t is string => !!t && t.trim().length > 0);
+                if (transcripts.length > 0) enqueueAnalysis(sessionId, transcripts);
+              }}
+            >
+              <IconSymbol name="sparkles" size={15} color={C.text} />
+              <Text style={styles.analyzeBtnText}>Retry analysis</Text>
+            </Pressable>
+          )}
+
+          {!isAnalyzing && !hasAI && allTranscribed && !hasNonEmptyTranscripts && sessionRecordings.length > 0 && (
+            <View style={styles.processingCard}>
+              <Text style={styles.processingText}>No speech detected — analysis unavailable.</Text>
+            </View>
+          )}
+
+          {!isAnalyzing && !hasAI && !allTranscribed && sessionRecordings.length > 0 && (
+            <View style={styles.processingCard}>
+              <Text style={styles.processingText}>
+                Analysis available once transcription completes
+              </Text>
+            </View>
+          )}
+
+          {keyPoints.length > 0 && (
+            <View style={styles.section}>
+              <Text style={styles.sectionHeader}>KEY POINTS</Text>
+              {keyPoints.map((point, i) => (
+                <View key={i} style={styles.bulletRow}>
+                  <Text style={styles.bulletDot}>•</Text>
+                  <Text style={styles.bulletText}>{point}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {actions.length > 0 && (
+            <View style={styles.section}>
+              <Text style={styles.sectionHeader}>ACTIONS</Text>
+              {actions.map((action, i) => (
+                <View key={i} style={styles.bulletRow}>
+                  <View style={styles.checkbox} />
+                  <Text style={styles.bulletText}>{action}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* ── Thoughts (recordings) ──────────────────────────────────────── */}
+
+          {sessionRecordings.length > 0 && (
+            <View style={styles.section}>
+              <Text style={styles.sectionHeader}>THOUGHTS</Text>
+              {sessionRecordings.map((item, index) => (
+                <ClipRow
+                  key={item.id}
+                  item={item}
+                  index={index}
+                  isActive={playingId === item.id}
+                  positionMs={positionMs}
+                  durationMs={durationMsState}
+                  isTranscribing={processingId === item.id && processingType === 'transcribe'}
+                  isQueued={queuedIds.has(item.id)}
+                  isFailed={failedIds.has(item.id)}
+                  onPlay={handlePlay}
+                  onSeek={handleSeek}
+                  onRetranscribe={handleRetranscribe}
+                  onSave={handleSave}
+                />
+              ))}
+            </View>
+          )}
+
+          {sessionRecordings.length === 0 && (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyText}>No thoughts recorded this walk.</Text>
+            </View>
+          )}
+        </ScrollView>
+      </SafeAreaView>
     </>
   );
 }
 
-// ── styles ────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
+  safe: {
+    flex:            1,
+    backgroundColor: C.background,
   },
-  dateText: {
-    fontSize: 14,
-    color: '#687076',
+  scrollContent: {
+    paddingHorizontal: 24,
+    paddingTop:        12,
+    paddingBottom:     48,
+  },
+
+  // ── Header ─────────────────────────────────────────────────────────────────
+  dateLabel: {
+    fontSize:  13,
+    color:     C.textTertiary,
     textAlign: 'center',
-    marginTop: 16,
     marginBottom: 4,
   },
-  statsRow: {
-    flexDirection: 'row',
-    marginHorizontal: 16,
-    marginVertical: 12,
-    backgroundColor: '#F5F5F5',
-    borderRadius: 12,
-    paddingVertical: 16,
+  aiTitle: {
+    fontSize:      24,
+    fontWeight:    '700',
+    color:         C.text,
+    letterSpacing: -0.3,
+    textAlign:     'center',
+    marginBottom:  16,
+    marginTop:      4,
   },
-  statCard: {
-    flex: 1,
+
+  // ── Stats ───────────────────────────────────────────────────────────────────
+  statsRow: {
+    flexDirection:   'row',
+    backgroundColor: C.surface,
+    borderRadius:    14,
+    paddingVertical: 16,
+    marginBottom:    24,
+  },
+  statItem: {
+    flex:       1,
     alignItems: 'center',
+    gap:         2,
   },
   statValue: {
-    fontSize: 22,
+    fontSize:   18,
     fontWeight: '700',
-    color: '#11181C',
+    color:      C.text,
   },
   statLabel: {
-    fontSize: 12,
-    color: '#687076',
-    marginTop: 2,
+    fontSize: 11,
+    color:    C.textSecondary,
   },
   statDivider: {
-    width: StyleSheet.hairlineWidth,
-    backgroundColor: '#C0C0C0',
-    marginVertical: 4,
+    width:           StyleSheet.hairlineWidth,
+    backgroundColor: C.border,
+    marginVertical:  4,
   },
-  listContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 32,
+
+  // ── AI processing / analyze button ─────────────────────────────────────────
+  processingCard: {
+    backgroundColor: C.surface,
+    borderRadius:    12,
+    padding:         14,
+    alignItems:      'center',
+    marginBottom:    16,
   },
-  clipRow: {
+  processingText: {
+    fontSize:  13,
+    color:     C.textSecondary,
+    fontStyle: 'italic',
+  },
+  analyzeBtn: {
+    flexDirection:   'row',
+    alignItems:      'center',
+    justifyContent:  'center',
+    gap:              8,
+    backgroundColor: C.tint,
+    borderRadius:    14,
     paddingVertical: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#E0E0E0',
+    marginBottom:    24,
   },
-  clipHeader: {
+  analyzeBtnText: {
+    fontSize:   16,
+    fontWeight: '600',
+    color:      C.text,
+  },
+
+  // ── Sections ────────────────────────────────────────────────────────────────
+  section: {
+    marginBottom: 28,
+  },
+  sectionHeader: {
+    fontSize:      11,
+    fontWeight:    '600',
+    color:         C.textTertiary,
+    letterSpacing: 1.2,
+    marginBottom:  12,
+  },
+  bulletRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    gap:            10,
+    marginBottom:   10,
+    alignItems:    'flex-start',
+  },
+  bulletDot: {
+    fontSize:   16,
+    color:      C.tint,
+    lineHeight: 22,
+    marginTop:   1,
+  },
+  bulletText: {
+    flex:       1,
+    fontSize:   15,
+    color:      C.text,
+    lineHeight: 22,
+  },
+  checkbox: {
+    width:        16,
+    height:       16,
+    borderRadius:  4,
+    borderWidth:   1.5,
+    borderColor:   C.tint,
+    marginTop:     3,
+    flexShrink:    0,
+  },
+
+  // ── Empty ───────────────────────────────────────────────────────────────────
+  emptyState: {
     alignItems: 'center',
-    marginBottom: 4,
-  },
-  clipTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#11181C',
-  },
-  clipDuration: {
-    fontSize: 13,
-    color: '#687076',
-  },
-  playButton: {
-    marginTop: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    backgroundColor: '#F0F0F0',
-    alignSelf: 'flex-start',
-  },
-  playButtonActive: {
-    backgroundColor: '#007AFF',
-  },
-  playButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#11181C',
-  },
-  playButtonTextActive: {
-    color: '#fff',
-  },
-  emptyContainer: {
-    paddingVertical: 48,
-    alignItems: 'center',
+    paddingTop:  40,
   },
   emptyText: {
     fontSize: 15,
-    color: '#888',
+    color:    C.textSecondary,
   },
 });

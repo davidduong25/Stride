@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   useAudioRecorder,
   requestRecordingPermissionsAsync,
@@ -8,12 +8,16 @@ import {
   type RecordingOptions,
 } from 'expo-audio';
 import { File } from 'expo-file-system';
+import { documentDirectory, moveAsync } from 'expo-file-system/legacy';
 
 // 16 kHz mono LinearPCM WAV — matches Whisper's expected input format.
-// Android MediaRecorder has no native WAV encoder; 'default'/'default' records
-// in whatever the device default is (typically AMR). PCM decode will still
-// attempt WAV parsing; correct WAV output is guaranteed only on iOS.
+// isMeteringEnabled must live here; passing it to prepareToRecordAsync would
+// wipe the other fields (createRecordingOptions reads all fields, treating
+// undefined as "no value" and letting the native side fall back to defaults).
+// Android MediaRecorder has no native WAV encoder; m4a (AAC) is used there
+// so that both the player and the transcription pipeline can handle the file.
 const WHISPER_RECORDING_OPTIONS: RecordingOptions = {
+  isMeteringEnabled: true,
   extension: '.wav',
   sampleRate: 16000,
   numberOfChannels: 1,
@@ -26,8 +30,9 @@ const WHISPER_RECORDING_OPTIONS: RecordingOptions = {
     linearPCMIsFloat: false,
   },
   android: {
-    outputFormat: 'default',
-    audioEncoder: 'default',
+    extension: '.m4a',
+    outputFormat: 'mpeg4',
+    audioEncoder: 'aac',
   },
   web: {
     mimeType: 'audio/wav',
@@ -45,12 +50,25 @@ export type RecordingResult = {
 
 // 5 Hz — good detail-to-storage ratio; 1 min recording ≈ 300 samples
 const METERING_INTERVAL_MS = 200;
+// How many metering samples to keep for the live waveform display (~6 seconds)
+const LIVE_WINDOW = 30;
 
 export function useAudioRecording() {
   const [isRecording, setIsRecording] = useState(false);
+  const [liveWaveform, setLiveWaveform] = useState<number[]>([]);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const recorder = useAudioRecorder(WHISPER_RECORDING_OPTIONS);
   const meteringTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const waveformSamplesRef = useRef<number[]>([]);
+
+  useEffect(() => {
+    return () => {
+      if (meteringTimerRef.current) {
+        clearInterval(meteringTimerRef.current);
+        meteringTimerRef.current = null;
+      }
+    };
+  }, []);
 
   async function startRecording() {
     const { granted } = await requestRecordingPermissionsAsync();
@@ -58,7 +76,17 @@ export function useAudioRecording() {
 
     await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
 
-    await recorder.prepareToRecordAsync({ isMeteringEnabled: true });
+    let prepared = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await recorder.prepareToRecordAsync();
+        prepared = true;
+        break;
+      } catch {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
+    if (!prepared) return;
     recorder.record();
     waveformSamplesRef.current = [];
 
@@ -67,7 +95,12 @@ export function useAudioRecording() {
         const status = recorder.getStatus();
         if (status.metering != null) {
           waveformSamplesRef.current.push(status.metering);
+          setLiveWaveform(prev => {
+            const next = [...prev, status.metering!];
+            return next.length > LIVE_WINDOW ? next.slice(-LIVE_WINDOW) : next;
+          });
         }
+        setRecordingSeconds(Math.round(recorder.currentTime));
       } catch { /* recorder may have stopped */ }
     }, METERING_INTERVAL_MS);
 
@@ -91,8 +124,10 @@ export function useAudioRecording() {
     const fileUri = recorder.uri;
 
     await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => { sub.remove(); resolve(); }, 5000);
       const sub = recorder.addListener('recordingStatusUpdate', (status) => {
         if (status.isFinished || status.hasError) {
+          clearTimeout(timeout);
           sub.remove();
           resolve();
         }
@@ -100,10 +135,17 @@ export function useAudioRecording() {
       recorder.stop();
     });
 
+    // Flip audio session back to playback-only immediately after recording stops.
+    // Leaving it in PlayAndRecord mode causes AVFoundation to refuse to load
+    // audio files in the player that is created shortly after.
+    await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+
+    setLiveWaveform([]);
+    setRecordingSeconds(0);
     setIsRecording(false);
     if (!fileUri) return null;
 
-    // Poll until iOS flushes audio data beyond the 4096-byte CAF skeleton.
+    // Poll until the recorder has flushed audio data to disk (beyond the empty file header).
     let ready = false;
     for (let i = 0; i < 20; i++) {
       const file = new File(fileUri);
@@ -112,14 +154,22 @@ export function useAudioRecording() {
     }
     if (!ready) return null;
 
+    // Move from cache/tmp (iOS can delete these) to the documents directory (persistent).
+    const filename = fileUri.split('/').pop() ?? `recording_${Date.now()}.wav`;
+    const persistentUri = (documentDirectory ?? '') + filename;
+    await moveAsync({ from: fileUri, to: persistentUri });
+
+    // Verify the move actually landed — surfaces silent failures early.
+    if (!new File(persistentUri).exists) return null;
+
     return {
-      uri: fileUri,
-      filename: fileUri.split('/').pop() ?? `recording_${Date.now()}.caf`,
+      uri: persistentUri,
+      filename,
       duration: Math.round(durationMs / 1000),
       waveform: JSON.stringify(waveformSamples),
       steps: stepCount,
     };
   }
 
-  return { isRecording, startRecording, stopRecording };
+  return { isRecording, liveWaveform, recordingSeconds, startRecording, stopRecording };
 }

@@ -1,33 +1,54 @@
 import { Tabs } from 'expo-router';
-import React from 'react';
 
 import { HapticTab } from '@/components/haptic-tab';
 import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Colors } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import { C } from '@/constants/theme';
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
-
   return (
     <Tabs
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
         headerShown: false,
         tabBarButton: HapticTab,
-      }}>
+        tabBarActiveTintColor:   C.tabIconSelected,
+        tabBarInactiveTintColor: C.tabIconDefault,
+        tabBarStyle: {
+          backgroundColor: C.tabBar,
+          borderTopColor:  C.border,
+          borderTopWidth:  0.5,
+        },
+        tabBarLabelStyle: {
+          fontSize:      11,
+          fontWeight:    '500',
+          letterSpacing: 0.3,
+        },
+      }}
+    >
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Home',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="house.fill" color={color} />,
+          title: 'home',
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={24} name="house.fill" color={color} />
+          ),
         }}
       />
       <Tabs.Screen
-        name="explore"
+        name="walks"
         options={{
-          title: 'Library',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="list.bullet" color={color} />,
+          title: 'walks',
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={24} name="figure.walk" color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="logs"
+        options={{
+          title: 'logs',
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={24} name="list.bullet.rectangle.portrait" color={color} />
+          ),
         }}
       />
     </Tabs>

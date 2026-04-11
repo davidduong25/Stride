@@ -8,16 +8,17 @@ export type RecordingEntry = {
   id: string;
   filename: string;
   uri: string;
-  duration: number;   // seconds
-  date: string;       // ISO string
+  duration: number;          // seconds
+  date: string;              // ISO string
   transcript: string | null;
-  tags: string | null;     // comma-separated, e.g. "idea,plan"
-  steps: number | null;    // cumulative pedometer count at stop time
-  waveform: string | null; // JSON array of dB samples
+  tags: string | null;       // comma-separated, e.g. "idea,plan"
+  steps: number | null;      // cumulative pedometer count at stop time
+  waveform: string | null;   // JSON array of dB samples
+  transcript_edited: number | null; // 1 if user has manually edited the transcript
 };
 
 type PatchFields = Partial<Pick<RecordingEntry,
-  'duration' | 'filename' | 'transcript' | 'tags' | 'steps' | 'waveform'
+  'duration' | 'filename' | 'transcript' | 'tags' | 'steps' | 'waveform' | 'transcript_edited'
 >>;
 
 export function useRecordings() {
@@ -44,6 +45,7 @@ export function useRecordings() {
         'ALTER TABLE recordings ADD COLUMN tags TEXT',
         'ALTER TABLE recordings ADD COLUMN steps INTEGER',
         'ALTER TABLE recordings ADD COLUMN waveform TEXT',
+        'ALTER TABLE recordings ADD COLUMN transcript_edited INTEGER',
       ];
       for (const sql of migrations) {
         try { await db.execAsync(sql); } catch { /* column already exists */ }
@@ -56,6 +58,10 @@ export function useRecordings() {
       setRecordings(rows);
     }
     init();
+    return () => {
+      dbRef.current?.closeAsync();
+      dbRef.current = null;
+    };
   }, []);
 
   async function addRecording(entry: Omit<RecordingEntry, 'id' | 'date'>): Promise<string | undefined> {
@@ -67,13 +73,14 @@ export function useRecordings() {
     };
     await dbRef.current.runAsync(
       `INSERT INTO recordings
-        (id, filename, uri, duration, date, transcript, tags, steps, waveform)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, filename, uri, duration, date, transcript, tags, steps, waveform, transcript_edited)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         newEntry.id, newEntry.filename, newEntry.uri,
         newEntry.duration, newEntry.date,
         newEntry.transcript ?? null, newEntry.tags ?? null,
         newEntry.steps ?? null, newEntry.waveform ?? null,
+        newEntry.transcript_edited ?? null,
       ]
     );
     setRecordings(prev => [newEntry, ...prev]);

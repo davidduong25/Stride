@@ -8,7 +8,10 @@
       "Bash(npx eas:*)",
       "Bash(npx eas-cli:*)",
       "Bash(eas build:view:*)",
-      "WebFetch(domain:api.expo.dev)"
+      "WebFetch(domain:api.expo.dev)",
+      "Bash(powershell:*)",
+      "Bash(del:*)",
+      "Bash(cmd:*)"
     ]
   }
 }
