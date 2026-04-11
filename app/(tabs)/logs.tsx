@@ -3,6 +3,7 @@ import {
   Pressable,
   SafeAreaView,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
@@ -88,9 +89,11 @@ type CardProps = {
   isAnalyzing:    boolean;
   onPress:        () => void;
   onLongPress:    () => void;
+  onShare:        () => void;
+  onAnalyze:      (() => void) | null;  // null when analysis already exists or unavailable
 };
 
-function SessionCard({ session, durationMs, recordingCount, isAnalyzing, onPress, onLongPress }: CardProps) {
+function SessionCard({ session, durationMs, recordingCount, isAnalyzing, onPress, onLongPress, onShare, onAnalyze }: CardProps) {
   const keyPoints = parseJsonArray(session.key_points);
   const actions   = parseJsonArray(session.actions);
   const hasAI     = session.title !== null;
@@ -149,13 +152,22 @@ function SessionCard({ session, durationMs, recordingCount, isAnalyzing, onPress
 
         <View style={cardStyles.actionRow}>
           <Pressable onPress={onPress} hitSlop={10} style={cardStyles.actionBtn}>
-            <IconSymbol name="play.fill"  size={14} color={C.textSecondary} />
+            <IconSymbol name="play.fill" size={14} color={C.textSecondary} />
           </Pressable>
-          <Pressable onPress={onPress} hitSlop={10} style={cardStyles.actionBtn}>
-            <IconSymbol name="doc.text"   size={14} color={C.textSecondary} />
+          <Pressable onPress={onShare} hitSlop={10} style={cardStyles.actionBtn}>
+            <IconSymbol name="square.and.arrow.up" size={14} color={C.textSecondary} />
           </Pressable>
-          <Pressable onPress={onPress} hitSlop={10} style={cardStyles.actionBtn}>
-            <IconSymbol name="sparkles"   size={14} color={C.textSecondary} />
+          <Pressable
+            onPress={onAnalyze ?? onPress}
+            hitSlop={10}
+            style={cardStyles.actionBtn}
+            disabled={isAnalyzing}
+          >
+            <IconSymbol
+              name="sparkles"
+              size={14}
+              color={onAnalyze && !isAnalyzing ? C.tint : C.textSecondary}
+            />
           </Pressable>
         </View>
       </View>
@@ -238,7 +250,56 @@ export default function LogsScreen() {
   const router                      = useRouter();
   const { sessions, deleteSession } = useSessionsContext();
   const { recordings }              = useRecordingsContext();
-  const { analyzingSessionId }      = useAIQueue();
+  const { analyzingSessionId, enqueueAnalysis } = useAIQueue();
+
+  function sessionRecs(session: SessionEntry) {
+    return recordings.filter(r => {
+      const t = new Date(r.date).getTime();
+      return t >= session.started_at && t <= session.ended_at + 60_000;
+    });
+  }
+
+  function handleShare(session: SessionEntry) {
+    const recs = sessionRecs(session);
+    const keyPoints = parseJsonArray(session.key_points);
+    const actions   = parseJsonArray(session.actions);
+    const durationMs = session.ended_at - session.started_at;
+
+    const lines: string[] = [];
+    lines.push(session.title ?? formatDateLabel(session.started_at));
+
+    const meta: string[] = [];
+    if (durationMs > 0) meta.push(formatDuration(durationMs));
+    if (session.steps > 0) meta.push(`${session.steps.toLocaleString()} steps`);
+    if (recs.length > 0) meta.push(`${recs.length} thought${recs.length !== 1 ? 's' : ''}`);
+    if (meta.length > 0) lines.push(meta.join(' · '));
+
+    if (keyPoints.length > 0) {
+      lines.push('', 'KEY POINTS');
+      keyPoints.forEach(p => lines.push(`• ${p}`));
+    }
+    if (actions.length > 0) {
+      lines.push('', 'ACTIONS');
+      actions.forEach(a => lines.push(`☐ ${a}`));
+    }
+
+    const transcripts = recs
+      .filter(r => r.transcript?.trim())
+      .map((r, i) => `[${i + 1}] ${r.transcript!.trim()}`);
+    if (transcripts.length > 0) {
+      lines.push('', 'THOUGHTS');
+      transcripts.forEach(t => lines.push(t));
+    }
+
+    Share.share({ message: lines.join('\n').trim() });
+  }
+
+  function handleAnalyze(session: SessionEntry) {
+    const transcripts = sessionRecs(session)
+      .map(r => r.transcript)
+      .filter((t): t is string => !!t?.trim());
+    if (transcripts.length > 0) enqueueAnalysis(session.id, transcripts);
+  }
 
   function confirmDeleteSession(session: SessionEntry) {
     Alert.alert(
@@ -291,20 +352,22 @@ export default function LogsScreen() {
           </View>
         ) : (
           sessions.map(session => {
-            const durationMs = session.ended_at - session.started_at;
-            const sessionRecordings = recordings.filter(r => {
-              const t = new Date(r.date).getTime();
-              return t >= session.started_at && t <= session.ended_at + 60_000;
-            });
+            const recs        = sessionRecs(session);
+            const isAnalyzing = analyzingSessionId === session.id;
+            const hasAI       = session.title !== null;
+            const hasTranscripts = recs.some(r => r.transcript?.trim());
+            const canAnalyze  = !hasAI && !isAnalyzing && hasTranscripts;
             return (
               <SessionCard
                 key={session.id}
                 session={session}
-                durationMs={durationMs}
-                recordingCount={sessionRecordings.length}
-                isAnalyzing={analyzingSessionId === session.id}
+                durationMs={session.ended_at - session.started_at}
+                recordingCount={recs.length}
+                isAnalyzing={isAnalyzing}
                 onPress={() => openSession(session)}
                 onLongPress={() => confirmDeleteSession(session)}
+                onShare={() => handleShare(session)}
+                onAnalyze={canAnalyze ? () => handleAnalyze(session) : null}
               />
             );
           })
