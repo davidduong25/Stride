@@ -1,7 +1,8 @@
 import { useEffect } from 'react';
 import { DarkTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack } from 'expo-router';
+import { Stack, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import 'react-native-reanimated';
 
 import { C } from '@/constants/theme';
@@ -30,6 +31,8 @@ export const unstable_settings = {
 };
 
 export default function RootLayout() {
+  const router = useRouter();
+
   useEffect(() => {
     try {
       const Notifications = require('expo-notifications');
@@ -42,6 +45,10 @@ export default function RootLayout() {
       });
       Notifications.requestPermissionsAsync();
     } catch { /* native module not available in this build */ }
+
+    AsyncStorage.getItem('momentum.hasOnboarded').then(val => {
+      if (val !== 'true') router.replace('/onboarding');
+    });
   }, []);
 
   return (
@@ -52,6 +59,7 @@ export default function RootLayout() {
             <WalkSessionProvider>
               <Stack>
                 <Stack.Screen name="(tabs)"       options={{ headerShown: false }} />
+                <Stack.Screen name="onboarding"   options={{ headerShown: false, gestureEnabled: false }} />
                 <Stack.Screen name="walk-summary" options={{ headerShown: true, title: 'Walk Summary', headerBackTitle: 'Done' }} />
               </Stack>
               <StatusBar style="light" />
