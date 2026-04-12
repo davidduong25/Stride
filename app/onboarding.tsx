@@ -20,7 +20,7 @@ const SLIDES = [
   {
     icon:  'figure.walk',
     color: C.tint,
-    title: 'momentum',
+    title: 'stride',
     body:  'A voice journal that lives inside your walks. Move to unlock. Think out loud. Come back to a summary.',
   },
   {

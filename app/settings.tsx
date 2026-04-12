@@ -1,9 +1,11 @@
+import { useEffect, useState } from 'react';
 import {
   Alert,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
@@ -31,25 +33,35 @@ function SettingsGroup({ children }: { children: React.ReactNode }) {
 }
 
 type RowProps = {
-  label:       string;
-  value?:      string;
+  label:        string;
+  value?:       string;
   destructive?: boolean;
-  chevron?:    boolean;
-  onPress?:    () => void;
+  chevron?:     boolean;
+  switchValue?: boolean;
+  onSwitch?:    (v: boolean) => void;
+  onPress?:     () => void;
 };
 
-function SettingsRow({ label, value, destructive, chevron, onPress }: RowProps) {
+function SettingsRow({ label, value, destructive, chevron, switchValue, onSwitch, onPress }: RowProps) {
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && onPress && styles.rowPressed]}
       onPress={onPress}
-      disabled={!onPress}
+      disabled={!onPress && onSwitch === undefined}
     >
       <Text style={[styles.rowLabel, destructive && styles.rowLabelDestructive]}>
         {label}
       </Text>
       {value !== undefined && (
         <Text style={styles.rowValue}>{value}</Text>
+      )}
+      {onSwitch !== undefined && (
+        <Switch
+          value={switchValue}
+          onValueChange={onSwitch}
+          trackColor={{ false: C.surfaceHigh, true: C.tint }}
+          thumbColor={C.text}
+        />
       )}
       {chevron && (
         <IconSymbol name="chevron.right" size={13} color={C.textTertiary} />
@@ -70,6 +82,17 @@ export default function SettingsScreen() {
   const router = useRouter();
   const { recordings, clearAllRecordings } = useRecordingsContext();
   const { sessions, clearAllSessions }     = useSessionsContext();
+
+  const [testMode, setTestMode] = useState(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem('momentum.testMode').then(val => setTestMode(val === 'true'));
+  }, []);
+
+  async function toggleTestMode(value: boolean) {
+    setTestMode(value);
+    await AsyncStorage.setItem('momentum.testMode', value ? 'true' : 'false');
+  }
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -144,6 +167,16 @@ export default function SettingsScreen() {
             label="Clear everything"
             destructive
             onPress={confirmClearEverything}
+          />
+        </SettingsGroup>
+
+        {/* Developer */}
+        <SectionHeader label="DEVELOPER" />
+        <SettingsGroup>
+          <SettingsRow
+            label="Test mode"
+            switchValue={testMode}
+            onSwitch={toggleTestMode}
           />
         </SettingsGroup>
 

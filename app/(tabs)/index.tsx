@@ -8,7 +8,9 @@ import {
   Text,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Haptics from 'expo-haptics';
 
 import { C } from '@/constants/theme';
 import { useAudioRecording } from '@/hooks/use-audio-recording';
@@ -18,6 +20,7 @@ import { useSessionsContext } from '@/context/sessions-context';
 import { useAIQueue } from '@/context/ai-queue-context';
 import { useWalkSession, type WalkSessionSnapshot } from '@/context/walk-session-context';
 import { IconSymbol } from '@/components/ui/icon-symbol';
+import { EllipsisMenu } from '@/components/EllipsisMenu';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,6 +44,7 @@ function computeStreak(sessionStartTimes: number[]): number {
   const DAY_MS = 86_400_000;
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
+  const todayMs = todayStart.getTime();
   const days = new Set(
     sessionStartTimes.map(ms => {
       const d = new Date(ms);
@@ -48,8 +52,10 @@ function computeStreak(sessionStartTimes: number[]): number {
       return d.getTime();
     })
   );
+  // If not walked today yet, start from yesterday so the streak stays intact until midnight
+  const cursor0 = days.has(todayMs) ? todayMs : todayMs - DAY_MS;
   let streak = 0;
-  let cursor = todayStart.getTime();
+  let cursor = cursor0;
   while (days.has(cursor)) { streak++; cursor -= DAY_MS; }
   return streak;
 }
@@ -108,6 +114,12 @@ export default function HomeScreen() {
 
   const [testMode, setTestMode] = useState(false);
 
+  useFocusEffect(useCallback(() => {
+    AsyncStorage.getItem('momentum.testMode').then(val => {
+      setTestMode(val === 'true');
+    });
+  }, []));
+
   const isSessionActiveRef = useRef(isSessionActive);
   isSessionActiveRef.current = isSessionActive;
   const isStoppingRef  = useRef(false);
@@ -144,31 +156,23 @@ export default function HomeScreen() {
 
   // ── Last walk (for "view last walk" on locked screen) ────────────────────
 
-  const SESSION_GAP_MS = 30 * 60 * 1000;
-  const lastWalkRecordings = (() => {
-    if (!recordings.length) return null;
-    const group = [recordings[0]];
-    for (let i = 1; i < recordings.length; i++) {
-      if (new Date(group[group.length - 1].date).getTime() -
-          new Date(recordings[i].date).getTime() <= SESSION_GAP_MS) {
-        group.push(recordings[i]);
-      } else break;
-    }
-    return group;
-  })();
+  const lastSession = sessions[0] ?? null;
 
   function openLastWalk() {
-    if (!lastWalkRecordings) return;
-    const data = lastWalkRecordings;
-    const firstSteps = data[data.length - 1].steps ?? 0;
-    const lastSteps  = data[0].steps ?? 0;
+    if (!lastSession) return;
+    const sessionRecordingIds = recordings
+      .filter(r => {
+        const t = new Date(r.date).getTime();
+        return t >= lastSession.started_at && t <= lastSession.ended_at + 60_000;
+      })
+      .map(r => r.id);
     router.push({
       pathname: '/walk-summary',
       params: {
-        startedAt:    new Date(data[data.length - 1].date).getTime().toString(),
-        endedAt:      (new Date(data[0].date).getTime() + data[0].duration * 1000).toString(),
-        steps:        Math.max(0, lastSteps - firstSteps).toString(),
-        recordingIds: data.map(r => r.id).join(','),
+        startedAt:    lastSession.started_at.toString(),
+        endedAt:      lastSession.ended_at.toString(),
+        steps:        lastSession.steps.toString(),
+        recordingIds: sessionRecordingIds.join(','),
       },
     });
   }
@@ -193,6 +197,7 @@ export default function HomeScreen() {
   const handleStopRecording = useCallback(() => {
     if (isStoppingRef.current) return;
     isStoppingRef.current = true;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const savePromise = (async () => {
       const result = await stopRecording(stepCountRef.current);
       isStoppingRef.current = false;
@@ -215,6 +220,7 @@ export default function HomeScreen() {
   }, [stopRecording, stepCountRef, addRecording, addRecordingToSession, enqueueTranscription]);
 
   const handleEndSession = useCallback(async () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     if (isRecording) handleStopRecording();
     await pendingSaveRef.current;
     if (!isSessionActiveRef.current) return;
@@ -272,16 +278,22 @@ export default function HomeScreen() {
     return () => sub.remove();
   }, [handleStopRecording]);
 
-  // ── AI status label ──────────────────────────────────────────────────────
+  // ── Model loader overlay (first-launch download) ─────────────────────────
 
-  const aiStatus = modelError
-    ? `AI error: ${modelError}`
-    : !isModelReady && modelDownloadProgress > 0
-    ? `Preparing AI… ${Math.round(modelDownloadProgress * 100)}%`
-    : !isModelReady
-    ? 'Loading AI model…'
+  const [showModelLoader, setShowModelLoader] = useState(false);
+
+  useEffect(() => {
+    if (isModelReady) { setShowModelLoader(false); return; }
+    const t = setTimeout(() => { if (!isModelReady) setShowModelLoader(true); }, 600);
+    return () => clearTimeout(t);
+  }, [isModelReady]);
+
+  // ── AI status label — hidden during active session (shown on walk-summary) ─
+
+  const aiStatus = isSessionActive ? null
     : processingType === 'transcribe' ? 'Transcribing…'
     : processingType === 'tag'        ? 'Tagging…'
+    : processingType === 'analyze'    ? 'Analyzing…'
     : null;
 
   // ── Grace period label ───────────────────────────────────────────────────
@@ -301,9 +313,7 @@ export default function HomeScreen() {
       {/* ── Header ── */}
       <View style={styles.header}>
         <Text style={styles.appName}>stride</Text>
-        <Pressable hitSlop={12}>
-          <IconSymbol name="ellipsis" size={20} color={C.icon} />
-        </Pressable>
+        <EllipsisMenu />
       </View>
 
       {displayState === 'locked' || displayState === 'ready' ? (
@@ -311,19 +321,28 @@ export default function HomeScreen() {
            LOCKED / READY — home screen
         ══════════════════════════════════════════════════════════════════ */
         <>
-          {/* Stats trio */}
-          <View style={styles.statsRow}>
-            {[
-              { value: formatCount(totalRecordings), label: 'recordings' },
-              { value: streak.toString(),             label: 'day streak' },
-              { value: formatCount(totalSteps),       label: 'steps'     },
-            ].map(({ value, label }) => (
-              <View key={label} style={styles.statCard}>
-                <Text style={styles.statValue}>{value}</Text>
-                <Text style={styles.statLabel}>{label}</Text>
-              </View>
-            ))}
-          </View>
+          {/* Stats trio — welcome card on first launch */}
+          {sessions.length === 0 && totalRecordings === 0 ? (
+            <View style={styles.welcomeCard}>
+              <Text style={styles.welcomeTitle}>welcome to stride</Text>
+              <Text style={styles.welcomeBody}>
+                walk to unlock recording — your stats will appear here
+              </Text>
+            </View>
+          ) : (
+            <Pressable style={styles.statsRow} onPress={() => router.push('/stats')}>
+              {[
+                { value: formatCount(totalRecordings), label: 'recordings' },
+                { value: streak.toString(),             label: 'day streak' },
+                { value: formatCount(totalSteps),       label: 'steps'     },
+              ].map(({ value, label }) => (
+                <View key={label} style={styles.statCard}>
+                  <Text style={styles.statValue}>{value}</Text>
+                  <Text style={styles.statLabel}>{label}</Text>
+                </View>
+              ))}
+            </Pressable>
+          )}
 
           {/* Movement ring */}
           <View style={styles.ringContainer}>
@@ -351,31 +370,21 @@ export default function HomeScreen() {
             {displayState === 'ready' && (
               <Pressable
                 style={styles.recordButton}
-                onPress={startRecording}
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  startRecording();
+                }}
               >
                 <Text style={styles.recordButtonText}>record</Text>
               </Pressable>
             )}
-            {lastWalkRecordings && displayState === 'locked' && (
+            {lastSession && displayState === 'locked' && (
               <Pressable onPress={openLastWalk} style={{ marginTop: 20 }}>
                 <Text style={styles.lastWalkLink}>view last walk →</Text>
               </Pressable>
             )}
-            {aiStatus && (
-              <Text style={styles.aiStatus}>{aiStatus}</Text>
-            )}
           </View>
 
-          {/* Test mode — small hidden tap target bottom-right */}
-          {!testMode && (
-            <Pressable
-              onPress={() => setTestMode(true)}
-              hitSlop={12}
-              style={styles.testModeBtn}
-            >
-              <Text style={styles.testModeText}>⚙</Text>
-            </Pressable>
-          )}
         </>
 
       ) : (
@@ -431,6 +440,41 @@ export default function HomeScreen() {
           )}
         </>
       )}
+
+      {/* Model download overlay — first launch only */}
+      {showModelLoader && !isModelReady && (
+        <View style={styles.modelOverlay}>
+          <Text style={styles.modelOverlayWordmark}>stride</Text>
+
+          <View style={styles.modelOverlayBody}>
+            <Text style={styles.modelOverlayLabel}>
+              {modelError
+                ? 'AI setup failed'
+                : modelDownloadProgress > 0
+                ? 'downloading AI model'
+                : 'preparing AI'}
+            </Text>
+
+            {!modelError && (
+              <>
+                <View style={styles.modelProgressTrack}>
+                  <View
+                    style={[
+                      styles.modelProgressFill,
+                      { width: `${Math.round(Math.max(modelDownloadProgress, 0.02) * 100)}%` },
+                    ]}
+                  />
+                </View>
+                {modelDownloadProgress > 0 && (
+                  <Text style={styles.modelProgressPct}>
+                    {Math.round(modelDownloadProgress * 100)}%
+                  </Text>
+                )}
+              </>
+            )}
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -460,6 +504,29 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color:      C.text,
     letterSpacing: -0.5,
+  },
+
+  // ── Welcome (first launch) ───────────────────────────────────────────────
+  welcomeCard: {
+    backgroundColor:   C.surface,
+    borderRadius:      12,
+    paddingVertical:   20,
+    paddingHorizontal: 20,
+    marginHorizontal:  24,
+    marginTop:         12,
+    alignItems:        'center',
+    gap:                6,
+  },
+  welcomeTitle: {
+    fontSize:   16,
+    fontWeight: '600',
+    color:      C.text,
+  },
+  welcomeBody: {
+    fontSize:  13,
+    color:     C.textSecondary,
+    textAlign: 'center',
+    lineHeight: 18,
   },
 
   // ── Stats ────────────────────────────────────────────────────────────────
@@ -538,16 +605,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color:    C.tint,
   },
-  testModeBtn: {
-    position: 'absolute',
-    bottom:   32,
-    right:    24,
-  },
-  testModeText: {
-    fontSize: 18,
-    color:    C.textTertiary,
-  },
-
   // ── Recording ────────────────────────────────────────────────────────────
   timerRingContainer: {
     alignItems:  'center',
@@ -643,5 +700,46 @@ const styles = StyleSheet.create({
     color:     C.textTertiary,
     marginTop: 12,
     paddingHorizontal: 24,
+  },
+
+  // ── Model download overlay ────────────────────────────────────────────────
+  modelOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: C.background,
+    alignItems:      'center',
+    justifyContent:  'center',
+    gap:             48,
+    paddingHorizontal: 40,
+  },
+  modelOverlayWordmark: {
+    fontSize:      36,
+    fontWeight:    '700',
+    color:         C.text,
+    letterSpacing: -0.5,
+  },
+  modelOverlayBody: {
+    alignSelf: 'stretch',
+    gap:       12,
+  },
+  modelOverlayLabel: {
+    fontSize:  13,
+    color:     C.textSecondary,
+    textAlign: 'center',
+  },
+  modelProgressTrack: {
+    height:          4,
+    borderRadius:    2,
+    backgroundColor: C.surfaceHigh,
+    overflow:        'hidden',
+  },
+  modelProgressFill: {
+    height:          4,
+    borderRadius:    2,
+    backgroundColor: C.tint,
+  },
+  modelProgressPct: {
+    fontSize:  12,
+    color:     C.textTertiary,
+    textAlign: 'right',
   },
 });

@@ -109,11 +109,19 @@ export default function WalksScreen() {
   const router = useRouter();
   const { recordings }  = useRecordingsContext();
   const { sessions, deleteSession } = useSessionsContext();
-  const [filter, setFilter] = useState<TimeFilter>('day');
+  const [filter, setFilter]       = useState<TimeFilter>('day');
+  const [selectedTag, setSelectedTag] = useState<string | null>(null);
 
-  const filtered         = filterSessions(sessions, filter);
-  const latestSession    = filtered[0] ?? null;
-  const previousSessions = filtered.slice(1);
+  const filtered = filterSessions(sessions, filter);
+
+  const allTags = [...new Set(filtered.flatMap(s => sessionTags(s)))].sort();
+
+  const displayed = selectedTag
+    ? filtered.filter(s => sessionTags(s).includes(selectedTag))
+    : filtered;
+
+  const latestSession    = displayed[0] ?? null;
+  const previousSessions = displayed.slice(1);
 
   function sessionRecordingIds(session: SessionEntry): string[] {
     return recordings
@@ -185,7 +193,7 @@ export default function WalksScreen() {
         {FILTERS.map(({ key, label }) => (
           <Pressable
             key={key}
-            onPress={() => setFilter(key)}
+            onPress={() => { setFilter(key); setSelectedTag(null); }}
             style={[
               styles.filterPill,
               filter === key && styles.filterPillActive,
@@ -201,13 +209,37 @@ export default function WalksScreen() {
         ))}
       </View>
 
+      {/* Tag filter */}
+      {allTags.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.tagFilterRow}
+          contentContainerStyle={styles.tagFilterContent}
+        >
+          {allTags.map(tag => (
+            <Pressable
+              key={tag}
+              onPress={() => setSelectedTag(selectedTag === tag ? null : tag)}
+              style={[styles.tagPill, selectedTag === tag && styles.tagPillActive]}
+            >
+              <Text style={[styles.tagPillText, selectedTag === tag && styles.tagPillTextActive]}>
+                {tag}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      )}
+
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {filtered.length === 0 ? (
+        {displayed.length === 0 ? (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyText}>No walks this {filter}.</Text>
+            <Text style={styles.emptyText}>
+              {selectedTag ? `No "${selectedTag}" walks this ${filter}.` : `No walks this ${filter}.`}
+            </Text>
             <Text style={styles.emptySubtext}>Start walking to record your first stride.</Text>
           </View>
         ) : (
@@ -471,6 +503,35 @@ const styles = StyleSheet.create({
   sessionStatDot: {
     fontSize: 13,
     color:    C.textTertiary,
+  },
+
+  // ── Tag filter ───────────────────────────────────────────────────────────
+  tagFilterRow: {
+    marginBottom: 12,
+  },
+  tagFilterContent: {
+    paddingHorizontal: 24,
+    gap:                6,
+  },
+  tagPill: {
+    paddingHorizontal: 12,
+    paddingVertical:    5,
+    borderRadius:      20,
+    backgroundColor:   C.surface,
+    borderWidth:       1,
+    borderColor:       C.border,
+  },
+  tagPillActive: {
+    backgroundColor: C.tint,
+    borderColor:     C.tint,
+  },
+  tagPillText: {
+    fontSize:   12,
+    color:      C.textSecondary,
+    fontWeight: '500',
+  },
+  tagPillTextActive: {
+    color: C.text,
   },
 
   // ── Empty ────────────────────────────────────────────────────────────────

@@ -305,10 +305,19 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
     throw new Error(`No CAF data chunk: file=${bytes.length}b chunks=[${log.join(',')}]`);
   }
 
-  // m4a/AAC (Android) starts with 'ftyp' — decoding AAC requires a native module
-  // or a separate codec library; pure-JS decoding is not supported here.
+  // m4a/AAC (Android) — decode via react-native-audio-api (Web Audio API).
+  // Install: npx expo install react-native-audio-api  →  then EAS Build.
   if (magic === 'ftyp') {
-    throw new Error('Android m4a recordings cannot be transcribed: AAC decoding requires a native module. Add react-native-audio-api (Web Audio decodeAudioData) or a similar library to support Android.');
+    try {
+      const { AudioContext } = require('react-native-audio-api');
+      const ctx: { decodeAudioData: (b: ArrayBuffer) => Promise<{ sampleRate: number; getChannelData: (c: number) => Float32Array }> }
+        = new AudioContext();
+      const audioBuffer = await ctx.decodeAudioData(bytes.buffer);
+      const channelData = audioBuffer.getChannelData(0);
+      return resampleTo16k(Array.from(channelData), audioBuffer.sampleRate);
+    } catch {
+      throw new Error('Android m4a transcription requires react-native-audio-api — run: npx expo install react-native-audio-api, then rebuild via EAS.');
+    }
   }
   throw new Error(`Unsupported audio format: "${magic}"`);
 }

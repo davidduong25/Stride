@@ -11,7 +11,8 @@
       "WebFetch(domain:api.expo.dev)",
       "Bash(powershell:*)",
       "Bash(del:*)",
-      "Bash(cmd:*)"
+      "Bash(cmd:*)",
+      "Bash(powershell.exe:*)"
     ]
   }
 }

@@ -380,6 +380,10 @@ export default function WalkSummaryScreen() {
       r => r.transcript !== null && !queuedIds.has(r.id) && processingId !== r.id
     );
 
+  const transcribedCount = sessionRecordings.filter(
+    r => r.transcript !== null && !queuedIds.has(r.id) && processingId !== r.id
+  ).length;
+
   const hasNonEmptyTranscripts = sessionRecordings.some(
     r => r.transcript && r.transcript.trim().length > 0
   );
@@ -647,12 +651,42 @@ export default function WalkSummaryScreen() {
 
           {/* ── AI Output ───────────────────────────────────────────────────── */}
 
-          {isAnalyzing && (
+          {/* Transcription progress */}
+          {!isAnalyzing && !hasAI && !allTranscribed && sessionRecordings.length > 0 && (
             <View style={styles.processingCard}>
-              <Text style={styles.processingText}>Analyzing your walk…</Text>
+              <View style={styles.processingRow}>
+                <Text style={styles.processingText}>
+                  Transcribing your thoughts
+                </Text>
+                <Text style={styles.processingCount}>
+                  {transcribedCount} of {sessionRecordings.length}
+                </Text>
+              </View>
+              <View style={styles.progressTrack}>
+                <View
+                  style={[
+                    styles.progressFill,
+                    { width: `${Math.round((transcribedCount / sessionRecordings.length) * 100)}%` },
+                  ]}
+                />
+              </View>
             </View>
           )}
 
+          {/* Analyzing */}
+          {isAnalyzing && (
+            <View style={styles.processingCard}>
+              <View style={styles.processingRow}>
+                <IconSymbol name="sparkles" size={13} color={C.tint} />
+                <Text style={styles.processingText}>Generating your summary</Text>
+              </View>
+              <View style={styles.progressTrack}>
+                <View style={[styles.progressFill, { width: '100%', opacity: 0.5 }]} />
+              </View>
+            </View>
+          )}
+
+          {/* Retry after silent failure */}
           {autoTriggered && !isAnalyzing && !hasAI && allTranscribed && hasNonEmptyTranscripts && (
             <Pressable
               style={styles.analyzeBtn}
@@ -671,14 +705,6 @@ export default function WalkSummaryScreen() {
           {!isAnalyzing && !hasAI && allTranscribed && !hasNonEmptyTranscripts && sessionRecordings.length > 0 && (
             <View style={styles.processingCard}>
               <Text style={styles.processingText}>No speech detected — analysis unavailable.</Text>
-            </View>
-          )}
-
-          {!isAnalyzing && !hasAI && !allTranscribed && sessionRecordings.length > 0 && (
-            <View style={styles.processingCard}>
-              <Text style={styles.processingText}>
-                Analysis available once transcription completes
-              </Text>
             </View>
           )}
 
@@ -807,14 +833,36 @@ const styles = StyleSheet.create({
   processingCard: {
     backgroundColor: C.surface,
     borderRadius:    12,
-    padding:         14,
-    alignItems:      'center',
+    padding:         16,
     marginBottom:    16,
+    gap:             12,
+  },
+  processingRow: {
+    flexDirection: 'row',
+    alignItems:    'center',
+    justifyContent: 'space-between',
+    gap:            8,
   },
   processingText: {
     fontSize:  13,
     color:     C.textSecondary,
-    fontStyle: 'italic',
+    flex:       1,
+  },
+  processingCount: {
+    fontSize:   12,
+    color:      C.textTertiary,
+    fontWeight: '500',
+  },
+  progressTrack: {
+    height:          3,
+    borderRadius:    2,
+    backgroundColor: C.surfaceHigh,
+    overflow:        'hidden',
+  },
+  progressFill: {
+    height:          3,
+    borderRadius:    2,
+    backgroundColor: C.tint,
   },
   analyzeBtn: {
     flexDirection:   'row',

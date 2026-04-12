@@ -79,5 +79,11 @@ export function useSessions() {
     setSessions(prev => prev.filter(s => s.id !== id));
   }
 
-  return { sessions, addSession, updateSession, deleteSession };
+  async function clearAllSessions(): Promise<void> {
+    if (!dbRef.current) return;
+    await dbRef.current.runAsync('DELETE FROM sessions');
+    setSessions([]);
+  }
+
+  return { sessions, addSession, updateSession, deleteSession, clearAllSessions };
 }

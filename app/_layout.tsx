@@ -62,6 +62,7 @@ export default function RootLayout() {
                 <Stack.Screen name="onboarding"   options={{ headerShown: false, gestureEnabled: false }} />
                 <Stack.Screen name="settings"     options={{ headerShown: true, title: 'Settings', headerBackTitle: 'Back' }} />
                 <Stack.Screen name="walk-summary" options={{ headerShown: true, title: 'Walk Summary', headerBackTitle: 'Done' }} />
+                <Stack.Screen name="stats"        options={{ headerShown: true, title: 'Stats', headerBackTitle: 'Back' }} />
               </Stack>
               <StatusBar style="light" />
             </WalkSessionProvider>

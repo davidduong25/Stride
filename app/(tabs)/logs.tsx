@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   Alert,
   Pressable,
@@ -6,6 +7,7 @@ import {
   Share,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { useRouter } from 'expo-router';
@@ -253,12 +255,36 @@ export default function LogsScreen() {
   const { recordings }              = useRecordingsContext();
   const { analyzingSessionId, enqueueAnalysis } = useAIQueue();
 
+  const [selectedTag, setSelectedTag]   = useState<string | null>(null);
+  const [searchQuery, setSearchQuery]   = useState('');
+
   function sessionRecs(session: SessionEntry) {
     return recordings.filter(r => {
       const t = new Date(r.date).getTime();
       return t >= session.started_at && t <= session.ended_at + 60_000;
     });
   }
+
+  function sessionTags(session: SessionEntry): string[] {
+    const all = sessionRecs(session)
+      .flatMap(r => (r.tags ? r.tags.split(',') : []))
+      .filter(Boolean);
+    return [...new Set(all)];
+  }
+
+  const allTags = [...new Set(sessions.flatMap(s => sessionTags(s)))].sort();
+
+  const tagFiltered = selectedTag
+    ? sessions.filter(s => sessionTags(s).includes(selectedTag))
+    : sessions;
+
+  const displayed = searchQuery.trim()
+    ? tagFiltered.filter(session => {
+        const q = searchQuery.toLowerCase();
+        if (session.title?.toLowerCase().includes(q)) return true;
+        return sessionRecs(session).some(r => r.transcript?.toLowerCase().includes(q));
+      })
+    : tagFiltered;
 
   function handleShare(session: SessionEntry) {
     const recs = sessionRecs(session);
@@ -338,19 +364,63 @@ export default function LogsScreen() {
         <EllipsisMenu />
       </View>
 
+      {/* Search */}
+      <View style={styles.searchRow}>
+        <IconSymbol name="magnifyingglass" size={14} color={C.textTertiary} />
+        <TextInput
+          style={styles.searchInput}
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+          placeholder="search thoughts…"
+          placeholderTextColor={C.textTertiary}
+          returnKeyType="search"
+          clearButtonMode="while-editing"
+        />
+      </View>
+
+      {/* Tag filter */}
+      {allTags.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.tagFilterRow}
+          contentContainerStyle={styles.tagFilterContent}
+        >
+          {allTags.map(tag => (
+            <Pressable
+              key={tag}
+              onPress={() => setSelectedTag(selectedTag === tag ? null : tag)}
+              style={[styles.tagPill, selectedTag === tag && styles.tagPillActive]}
+            >
+              <Text style={[styles.tagPillText, selectedTag === tag && styles.tagPillTextActive]}>
+                {tag}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      )}
+
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {sessions.length === 0 ? (
+        {displayed.length === 0 ? (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyText}>No walks yet.</Text>
-            <Text style={styles.emptySubtext}>
-              Complete a walk to see your AI-generated logs here.
-            </Text>
+            {sessions.length === 0 ? (
+              <>
+                <Text style={styles.emptyText}>No walks yet.</Text>
+                <Text style={styles.emptySubtext}>
+                  Complete a walk to see your AI-generated logs here.
+                </Text>
+              </>
+            ) : searchQuery.trim() ? (
+              <Text style={styles.emptyText}>No results for "{searchQuery}".</Text>
+            ) : (
+              <Text style={styles.emptyText}>No "{selectedTag}" walks.</Text>
+            )}
           </View>
         ) : (
-          sessions.map(session => {
+          displayed.map(session => {
             const recs        = sessionRecs(session);
             const isAnalyzing = analyzingSessionId === session.id;
             const hasAI       = session.title !== null;
@@ -399,6 +469,53 @@ const styles = StyleSheet.create({
     color:         C.text,
     letterSpacing: -0.5,
   },
+  // ── Search ───────────────────────────────────────────────────────────────
+  searchRow: {
+    flexDirection:     'row',
+    alignItems:        'center',
+    marginHorizontal:  24,
+    marginBottom:      10,
+    backgroundColor:   C.surface,
+    borderRadius:      12,
+    paddingHorizontal: 12,
+    paddingVertical:    9,
+    gap:                8,
+  },
+  searchInput: {
+    flex:     1,
+    fontSize: 14,
+    color:    C.text,
+  },
+
+  // ── Tag filter ───────────────────────────────────────────────────────────
+  tagFilterRow: {
+    marginBottom: 8,
+  },
+  tagFilterContent: {
+    paddingHorizontal: 24,
+    gap:                6,
+  },
+  tagPill: {
+    paddingHorizontal: 12,
+    paddingVertical:    5,
+    borderRadius:      20,
+    backgroundColor:   C.surface,
+    borderWidth:       1,
+    borderColor:       C.border,
+  },
+  tagPillActive: {
+    backgroundColor: C.tint,
+    borderColor:     C.tint,
+  },
+  tagPillText: {
+    fontSize:   12,
+    color:      C.textSecondary,
+    fontWeight: '500',
+  },
+  tagPillTextActive: {
+    color: C.text,
+  },
+
   scrollContent: {
     paddingHorizontal: 24,
     paddingTop:        8,
