@@ -74,7 +74,7 @@ export function useAudioRecording() {
     const { granted } = await requestRecordingPermissionsAsync();
     if (!granted) return;
 
-    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, staysActiveInBackground: true });
 
     let prepared = false;
     for (let attempt = 0; attempt < 3; attempt++) {

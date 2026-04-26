@@ -12,7 +12,8 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.davidduong25.stride",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": ["audio"]
       }
     },
     "android": {
