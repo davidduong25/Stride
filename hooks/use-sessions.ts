@@ -8,12 +8,14 @@ export type SessionEntry = {
   started_at: number;      // unix ms
   ended_at: number;        // unix ms
   steps: number;
-  title: string | null;    // AI-generated, null until mega-prompt runs
+  title: string | null;    // AI-generated, null until analysis runs
   key_points: string | null; // JSON string of string[]
   actions: string | null;    // JSON string of string[]
+  walk_type: string | null;  // confirmed WalkType, set when user triggers analysis
+  summary: string | null;    // prose summary for vent/reflect/appreciate/untangle types
 };
 
-type SessionPatch = Partial<Pick<SessionEntry, 'title' | 'key_points' | 'actions'>>;
+type SessionPatch = Partial<Pick<SessionEntry, 'title' | 'key_points' | 'actions' | 'walk_type' | 'summary'>>;
 
 export function useSessions() {
   const [sessions, setSessions] = useState<SessionEntry[]>([]);
@@ -33,6 +35,14 @@ export function useSessions() {
           actions    TEXT
         );
       `);
+
+      const sessionMigrations = [
+        'ALTER TABLE sessions ADD COLUMN walk_type TEXT',
+        'ALTER TABLE sessions ADD COLUMN summary TEXT',
+      ];
+      for (const sql of sessionMigrations) {
+        try { await db.execAsync(sql); } catch { /* column already exists */ }
+      }
       dbRef.current = db;
       const rows = await db.getAllAsync<SessionEntry>(
         'SELECT * FROM sessions ORDER BY started_at DESC'
@@ -50,11 +60,11 @@ export function useSessions() {
     entry: Pick<SessionEntry, 'id' | 'started_at' | 'ended_at' | 'steps'>
   ): Promise<void> {
     if (!dbRef.current) return;
-    const newEntry: SessionEntry = { ...entry, title: null, key_points: null, actions: null };
+    const newEntry: SessionEntry = { ...entry, title: null, key_points: null, actions: null, walk_type: null, summary: null };
     await dbRef.current.runAsync(
       `INSERT OR REPLACE INTO sessions
-        (id, started_at, ended_at, steps, title, key_points, actions)
-        VALUES (?, ?, ?, ?, NULL, NULL, NULL)`,
+        (id, started_at, ended_at, steps, title, key_points, actions, walk_type, summary)
+        VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)`,
       [newEntry.id, newEntry.started_at, newEntry.ended_at, newEntry.steps]
     );
     setSessions(prev => [newEntry, ...prev.filter(s => s.id !== newEntry.id)]);

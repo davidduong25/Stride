@@ -29,6 +29,10 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS"
       ]
     },
@@ -72,8 +76,15 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "59be976a-268c-413c-80e0-30d95d32538f"
+        "projectId": "49af62c4-7e83-4e9c-8b04-661440a0b5f1"
       }
+    },
+    "owner": "davidduong25",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/49af62c4-7e83-4e9c-8b04-661440a0b5f1"
     }
   }
 }

@@ -135,10 +135,9 @@ export function useAudioRecording() {
       recorder.stop();
     });
 
-    // Flip audio session back to playback-only immediately after recording stops.
-    // Leaving it in PlayAndRecord mode causes AVFoundation to refuse to load
-    // audio files in the player that is created shortly after.
-    await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+    try {
+      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+    } catch { /* ignore — audio session flip is best-effort */ }
 
     setLiveWaveform([]);
     setRecordingSeconds(0);
@@ -157,9 +156,20 @@ export function useAudioRecording() {
     // Move from cache/tmp (iOS can delete these) to the documents directory (persistent).
     const filename = fileUri.split('/').pop() ?? `recording_${Date.now()}.wav`;
     const persistentUri = (documentDirectory ?? '') + filename;
-    await moveAsync({ from: fileUri, to: persistentUri });
+    try {
+      await moveAsync({ from: fileUri, to: persistentUri });
+    } catch {
+      // Move failed (OS may have purged the cache file under memory pressure).
+      // Fall back to the original URI so the recording isn't completely lost.
+      return {
+        uri: fileUri,
+        filename,
+        duration: Math.round(durationMs / 1000),
+        waveform: JSON.stringify(waveformSamples),
+        steps: stepCount,
+      };
+    }
 
-    // Verify the move actually landed — surfaces silent failures early.
     if (!new File(persistentUri).exists) return null;
 
     return {

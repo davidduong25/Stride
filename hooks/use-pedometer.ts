@@ -69,7 +69,7 @@ export function usePedometer() {
 
   function pauseIntentionally() {
     const cur = stateRef.current;
-    if (cur !== 'unlocked' && cur !== 'provisional') return;
+    if (cur === 'checking' || cur === 'unavailable' || cur === 'paused') return;
     if (stepLockTimerRef.current) {
       clearTimeout(stepLockTimerRef.current);
       stepLockTimerRef.current = null;

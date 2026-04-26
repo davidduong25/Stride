@@ -122,9 +122,15 @@ export default function HomeScreen() {
 
   const isSessionActiveRef = useRef(isSessionActive);
   isSessionActiveRef.current = isSessionActive;
-  const isStoppingRef  = useRef(false);
-  const pendingSaveRef = useRef<Promise<void>>(Promise.resolve());
-  const prevStateRef   = useRef<PedometerState>(pedometerState);
+  const isStoppingRef    = useRef(false);
+  const pendingSaveRef   = useRef<Promise<void>>(Promise.resolve());
+  const prevStateRef     = useRef<PedometerState>(pedometerState);
+  const sessionBaseRef   = useRef(0);
+
+  function beginSession(steps: number) {
+    sessionBaseRef.current = steps;
+    startSession(steps);
+  }
 
   // ── Derived display state ─────────────────────────────────────────────────
 
@@ -142,7 +148,7 @@ export default function HomeScreen() {
     if (displayState === 'locked')    return C.surfaceHigh;
     if (displayState === 'recording') {
       if (pedometerState === 'paused') return C.yellow;
-      if (graceSecondsLeft !== null && graceSecondsLeft < 60) return C.yellow;
+      if (graceSecondsLeft !== null && graceSecondsLeft <= 50) return C.yellow;
       return C.green;
     }
     return C.tint;
@@ -199,41 +205,46 @@ export default function HomeScreen() {
     isStoppingRef.current = true;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const savePromise = (async () => {
-      const result = await stopRecording(stepCountRef.current);
-      isStoppingRef.current = false;
-      if (!result) return;
-      let id: string | undefined;
       try {
-        id = await addRecording({
-          uri: result.uri, filename: result.filename,
-          duration: result.duration, waveform: result.waveform,
-          steps: result.steps, transcript: null,
-          tags: null, transcript_edited: null,
-        });
+        const result = await stopRecording(stepCountRef.current);
+        isStoppingRef.current = false;
+        if (!result) return;
+        let id: string | undefined;
+        try {
+          id = await addRecording({
+            uri: result.uri, filename: result.filename,
+            duration: result.duration, waveform: result.waveform,
+            steps: result.steps, transcript: null,
+            tags: null, transcript_edited: null,
+          });
+        } catch {
+          Alert.alert('Save failed', 'Could not save the recording. Please try again.');
+          return;
+        }
+        if (id) { addRecordingToSession(id); enqueueTranscription(id, result.uri); }
       } catch {
-        Alert.alert('Save failed', 'Could not save the recording. Please try again.');
-        return;
+        isStoppingRef.current = false;
       }
-      if (id) { addRecordingToSession(id); enqueueTranscription(id, result.uri); }
     })();
     pendingSaveRef.current = savePromise;
   }, [stopRecording, stepCountRef, addRecording, addRecordingToSession, enqueueTranscription]);
 
   const handleEndSession = useCallback(async () => {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    if (isRecording) handleStopRecording();
-    await pendingSaveRef.current;
-    if (!isSessionActiveRef.current) return;
-    const snapshot = await endSession(stepCountRef.current);
-    if (snapshot) {
+    try {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      if (isRecording) handleStopRecording();
+      await pendingSaveRef.current;
+      if (!isSessionActiveRef.current) return;
+      const snapshot = await endSession(stepCountRef.current);
+      if (!snapshot) return;
       await addSession({
         id: snapshot.startedAt.toString(),
         started_at: snapshot.startedAt,
         ended_at:   snapshot.endedAt,
         steps:      snapshot.stepCount,
       });
-      if (snapshot.recordingIds.length > 0) navigateToSummary(snapshot);
-    }
+      navigateToSummary(snapshot);
+    } catch { /* prevent unhandled rejection crash on New Architecture */ }
   }, [isRecording, handleStopRecording, endSession, stepCountRef, addSession, navigateToSummary]);
 
   // ── Pedometer-driven effects ─────────────────────────────────────────────
@@ -247,25 +258,26 @@ export default function HomeScreen() {
     prevStateRef.current = pedometerState;
     if ((pedometerState === 'provisional' || pedometerState === 'unlocked') &&
         !isSessionActiveRef.current) {
-      startSession(stepCountRef.current);
+      beginSession(stepCountRef.current);
       return;
     }
     if (pedometerState === 'locked' && prev !== 'checking' && prev !== 'unavailable' &&
         isSessionActiveRef.current) {
       let cancelled = false;
       (async () => {
-        await pendingSaveRef.current;
-        if (cancelled || !isSessionActiveRef.current) return;
-        const snapshot = await endSession(stepCountRef.current);
-        if (snapshot) {
+        try {
+          await pendingSaveRef.current;
+          if (cancelled || !isSessionActiveRef.current) return;
+          const snapshot = await endSession(stepCountRef.current);
+          if (!snapshot) return;
           await addSession({
             id: snapshot.startedAt.toString(),
             started_at: snapshot.startedAt,
             ended_at:   snapshot.endedAt,
             steps:      snapshot.stepCount,
           });
-          if (snapshot.recordingIds.length > 0) navigateToSummary(snapshot);
-        }
+          navigateToSummary(snapshot);
+        } catch { /* prevent unhandled rejection crash on New Architecture */ }
       })();
       return () => { cancelled = true; };
     }
@@ -372,6 +384,7 @@ export default function HomeScreen() {
                 style={styles.recordButton}
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  if (!isSessionActive) beginSession(stepCountRef.current);
                   startRecording();
                 }}
               >
@@ -407,10 +420,12 @@ export default function HomeScreen() {
 
           {/* Step count */}
           <View style={styles.stepSection}>
-            <Text style={styles.stepCount}>{stepCount.toLocaleString()}</Text>
+            <Text style={styles.stepCount}>
+              {Math.max(0, stepCount - sessionBaseRef.current).toLocaleString()}
+            </Text>
             <Text style={styles.stepLabel}>steps this stride</Text>
             <Text style={styles.distanceLabel}>
-              {distanceMiles.toFixed(2)} mi · keep going
+              {(Math.max(0, stepCount - sessionBaseRef.current) / 2200).toFixed(2)} mi · keep going
             </Text>
           </View>
 

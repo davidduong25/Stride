@@ -16,7 +16,7 @@ import { C } from '@/constants/theme';
 import { useSessionsContext, type SessionEntry } from '@/context/sessions-context';
 import { EllipsisMenu } from '@/components/EllipsisMenu';
 import { useRecordingsContext } from '@/context/recordings-context';
-import { useAIQueue } from '@/context/ai-queue-context';
+import { useAIQueue, type WalkType, VALID_WALK_TYPES, WALK_TYPE_LABELS } from '@/context/ai-queue-context';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 
 // ---------------------------------------------------------------------------
@@ -30,8 +30,8 @@ function formatDateLabel(ms: number): string {
   const timeStr = new Date(ms).toLocaleTimeString(undefined, {
     hour: 'numeric', minute: '2-digit',
   });
-  if (ms >= todayMs)                      return `Today · ${timeStr}`;
-  if (ms >= todayMs - 86_400_000)         return `Yesterday · ${timeStr}`;
+  if (ms >= todayMs)              return `Today · ${timeStr}`;
+  if (ms >= todayMs - 86_400_000) return `Yesterday · ${timeStr}`;
   return new Date(ms).toLocaleDateString(undefined, {
     month: 'short', day: 'numeric',
   }) + ` · ${timeStr}`;
@@ -55,31 +55,27 @@ function parseJsonArray(json: string | null): string[] {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
-
-function CountChip({ label }: { label: string }) {
-  return (
-    <View style={chipStyles.chip}>
-      <Text style={chipStyles.text}>{label}</Text>
-    </View>
-  );
+function sessionWalkType(
+  session: SessionEntry,
+  recordings: ReturnType<typeof useRecordingsContext>['recordings']
+): WalkType | null {
+  if (session.walk_type && (VALID_WALK_TYPES as readonly string[]).includes(session.walk_type)) {
+    return session.walk_type as WalkType;
+  }
+  const tags = recordings
+    .filter(r => {
+      const t = new Date(r.date).getTime();
+      return t >= session.started_at && t <= session.ended_at + 60_000;
+    })
+    .map(r => r.tags)
+    .filter((t): t is string => t !== null && (VALID_WALK_TYPES as readonly string[]).includes(t));
+  if (tags.length === 0) return null;
+  const counts: Record<string, number> = {};
+  for (const t of tags) counts[t] = (counts[t] ?? 0) + 1;
+  return tags.reduce((a, b) => counts[a] >= counts[b] ? a : b) as WalkType;
 }
 
-const chipStyles = StyleSheet.create({
-  chip: {
-    paddingHorizontal: 10,
-    paddingVertical:    3,
-    borderRadius:      12,
-    backgroundColor:   C.tint,
-  },
-  text: {
-    fontSize:   12,
-    color:      C.text,
-    fontWeight: '600',
-  },
-});
+type SortOption = 'recent' | 'longest' | 'type';
 
 // ---------------------------------------------------------------------------
 // SessionCard
@@ -89,20 +85,28 @@ type CardProps = {
   session:        SessionEntry;
   durationMs:     number;
   recordingCount: number;
+  walkType:       WalkType | null;
   isAnalyzing:    boolean;
+  hasPendingSummary: boolean;
   onPress:        () => void;
   onLongPress:    () => void;
   onShare:        () => void;
-  onAnalyze:      (() => void) | null;  // null when analysis already exists or unavailable
 };
 
-function SessionCard({ session, durationMs, recordingCount, isAnalyzing, onPress, onLongPress, onShare, onAnalyze }: CardProps) {
+function SessionCard({
+  session,
+  durationMs,
+  recordingCount,
+  walkType,
+  isAnalyzing,
+  hasPendingSummary,
+  onPress,
+  onLongPress,
+  onShare,
+}: CardProps) {
   const keyPoints = parseJsonArray(session.key_points);
-  const actions   = parseJsonArray(session.actions);
   const hasAI     = session.title !== null;
-
-  // Show the first key point as preview text, if available
-  const preview = keyPoints[0] ?? null;
+  const preview   = keyPoints[0] ?? null;
 
   return (
     <Pressable style={cardStyles.card} onPress={onPress} onLongPress={onLongPress}>
@@ -121,35 +125,32 @@ function SessionCard({ session, durationMs, recordingCount, isAnalyzing, onPress
         </Text>
       )}
 
-      {/* Analyzing indicator */}
       {isAnalyzing && !hasAI && (
         <Text style={cardStyles.processingLabel}>Processing…</Text>
       )}
 
-      {/* Preview text */}
       {preview && (
         <Text style={cardStyles.preview} numberOfLines={2}>
           {preview}
         </Text>
       )}
 
-      {/* Bottom row: count chips + action icons */}
+      {/* Bottom row: walk type badge + action icons */}
       <View style={cardStyles.bottomRow}>
         <View style={cardStyles.chips}>
-          {keyPoints.length > 0 && (
-            <CountChip
-              label={`${keyPoints.length} key point${keyPoints.length !== 1 ? 's' : ''}`}
-            />
+          {walkType && (
+            <View style={cardStyles.walkTypeBadge}>
+              <Text style={cardStyles.walkTypeBadgeText}>
+                {WALK_TYPE_LABELS[walkType]}
+              </Text>
+            </View>
           )}
-          {actions.length > 0 && (
-            <CountChip
-              label={`${actions.length} action${actions.length !== 1 ? 's' : ''}`}
-            />
-          )}
-          {!hasAI && recordingCount > 0 && (
-            <CountChip
-              label={`${recordingCount} thought${recordingCount !== 1 ? 's' : ''}`}
-            />
+          {!hasAI && recordingCount > 0 && !walkType && (
+            <View style={[cardStyles.walkTypeBadge, cardStyles.walkTypeBadgeMuted]}>
+              <Text style={[cardStyles.walkTypeBadgeText, cardStyles.walkTypeBadgeTextMuted]}>
+                {recordingCount} thought{recordingCount !== 1 ? 's' : ''}
+              </Text>
+            </View>
           )}
         </View>
 
@@ -157,19 +158,15 @@ function SessionCard({ session, durationMs, recordingCount, isAnalyzing, onPress
           <Pressable onPress={onPress} hitSlop={10} style={cardStyles.actionBtn}>
             <IconSymbol name="play.fill" size={14} color={C.textSecondary} />
           </Pressable>
-          <Pressable onPress={onShare} hitSlop={10} style={cardStyles.actionBtn}>
+          <Pressable onPress={onShare} hitSlop={10} style={[cardStyles.actionBtn, {marginTop: 2 }]}>
             <IconSymbol name="square.and.arrow.up" size={14} color={C.textSecondary} />
           </Pressable>
-          <Pressable
-            onPress={onAnalyze ?? onPress}
-            hitSlop={10}
-            style={cardStyles.actionBtn}
-            disabled={isAnalyzing}
-          >
+          {/* Sparkle navigates to walk-summary where summary confirmation lives */}
+          <Pressable onPress={onPress} hitSlop={10} style={cardStyles.actionBtn} disabled={isAnalyzing}>
             <IconSymbol
               name="sparkles"
               size={14}
-              color={onAnalyze && !isAnalyzing ? C.tint : C.textSecondary}
+              color={hasPendingSummary && !isAnalyzing ? C.tint : C.textSecondary}
             />
           </Pressable>
         </View>
@@ -235,6 +232,23 @@ const cardStyles = StyleSheet.create({
     gap:            6,
     flex:           1,
   },
+  walkTypeBadge: {
+    paddingHorizontal: 10,
+    paddingVertical:    3,
+    borderRadius:      12,
+    backgroundColor:   C.tint,
+  },
+  walkTypeBadgeMuted: {
+    backgroundColor: C.surfaceHigh,
+  },
+  walkTypeBadgeText: {
+    fontSize:   12,
+    color:      C.text,
+    fontWeight: '600',
+  },
+  walkTypeBadgeTextMuted: {
+    color: C.textSecondary,
+  },
   actionRow: {
     flexDirection: 'row',
     gap:            12,
@@ -253,10 +267,11 @@ export default function LogsScreen() {
   const router                      = useRouter();
   const { sessions, deleteSession } = useSessionsContext();
   const { recordings }              = useRecordingsContext();
-  const { analyzingSessionId, enqueueAnalysis } = useAIQueue();
+  const { analyzingSessionId }      = useAIQueue();
 
-  const [selectedTag, setSelectedTag]   = useState<string | null>(null);
-  const [searchQuery, setSearchQuery]   = useState('');
+  const [sortBy, setSortBy]           = useState<SortOption>('recent');
+  const [filterType, setFilterType]   = useState<WalkType | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   function sessionRecs(session: SessionEntry) {
     return recordings.filter(r => {
@@ -265,49 +280,68 @@ export default function LogsScreen() {
     });
   }
 
-  function sessionTags(session: SessionEntry): string[] {
-    const all = sessionRecs(session)
-      .flatMap(r => (r.tags ? r.tags.split(',') : []))
-      .filter(Boolean);
-    return [...new Set(all)];
-  }
-
-  const allTags = [...new Set(sessions.flatMap(s => sessionTags(s)))].sort();
-
-  const tagFiltered = selectedTag
-    ? sessions.filter(s => sessionTags(s).includes(selectedTag))
-    : sessions;
-
-  const displayed = searchQuery.trim()
-    ? tagFiltered.filter(session => {
+  const searched = searchQuery.trim()
+    ? sessions.filter(session => {
         const q = searchQuery.toLowerCase();
         if (session.title?.toLowerCase().includes(q)) return true;
         return sessionRecs(session).some(r => r.transcript?.toLowerCase().includes(q));
       })
-    : tagFiltered;
+    : sessions;
+
+  const filtered = filterType
+    ? searched.filter(s => sessionWalkType(s, recordings) === filterType)
+    : searched;
+
+  const sorted = (() => {
+    if (sortBy === 'longest') {
+      return [...filtered].sort(
+        (a, b) => (b.ended_at - b.started_at) - (a.ended_at - a.started_at)
+      );
+    }
+    if (sortBy === 'type') {
+      return [...filtered].sort((a, b) => {
+        const ta = sessionWalkType(a, recordings) ?? 'zzz';
+        const tb = sessionWalkType(b, recordings) ?? 'zzz';
+        return ta.localeCompare(tb);
+      });
+    }
+    return filtered; // 'recent' — already sorted by started_at DESC from SQLite
+  })();
 
   function handleShare(session: SessionEntry) {
-    const recs = sessionRecs(session);
-    const keyPoints = parseJsonArray(session.key_points);
-    const actions   = parseJsonArray(session.actions);
+    const recs       = sessionRecs(session);
+    const keyPoints  = parseJsonArray(session.key_points);
+    const actions    = parseJsonArray(session.actions);
     const durationMs = session.ended_at - session.started_at;
+    const wt         = session.walk_type as WalkType | null;
 
     const lines: string[] = [];
     lines.push(session.title ?? formatDateLabel(session.started_at));
 
     const meta: string[] = [];
-    if (durationMs > 0) meta.push(formatDuration(durationMs));
-    if (session.steps > 0) meta.push(`${session.steps.toLocaleString()} steps`);
-    if (recs.length > 0) meta.push(`${recs.length} thought${recs.length !== 1 ? 's' : ''}`);
-    if (meta.length > 0) lines.push(meta.join(' · '));
+    if (durationMs > 0)     meta.push(formatDuration(durationMs));
+    if (session.steps > 0)  meta.push(`${session.steps.toLocaleString()} steps`);
+    if (recs.length > 0)    meta.push(`${recs.length} thought${recs.length !== 1 ? 's' : ''}`);
+    if (meta.length > 0)    lines.push(meta.join(' · '));
 
-    if (keyPoints.length > 0) {
-      lines.push('', 'KEY POINTS');
+    if ((wt === 'vent' || wt === 'reflect' || wt === 'untangle') && session.summary) {
+      lines.push('', session.summary);
+    }
+    if (wt === 'brainstorm' && keyPoints.length > 0) {
+      lines.push('', 'IDEAS');
       keyPoints.forEach(p => lines.push(`• ${p}`));
     }
-    if (actions.length > 0) {
+    if (wt === 'appreciate' && keyPoints.length > 0) {
+      lines.push('', 'APPRECIATIONS');
+      keyPoints.forEach(p => lines.push(`• ${p}`));
+    }
+    if (wt === 'plan' && actions.length > 0) {
       lines.push('', 'ACTIONS');
       actions.forEach(a => lines.push(`☐ ${a}`));
+    }
+    if (!wt) {
+      if (keyPoints.length > 0) { lines.push('', 'KEY POINTS'); keyPoints.forEach(p => lines.push(`• ${p}`)); }
+      if (actions.length   > 0) { lines.push('', 'ACTIONS');    actions.forEach(a => lines.push(`☐ ${a}`)); }
     }
 
     const transcripts = recs
@@ -319,13 +353,6 @@ export default function LogsScreen() {
     }
 
     Share.share({ message: lines.join('\n').trim() });
-  }
-
-  function handleAnalyze(session: SessionEntry) {
-    const transcripts = sessionRecs(session)
-      .map(r => r.transcript)
-      .filter((t): t is string => !!t?.trim());
-    if (transcripts.length > 0) enqueueAnalysis(session.id, transcripts);
   }
 
   function confirmDeleteSession(session: SessionEntry) {
@@ -340,7 +367,6 @@ export default function LogsScreen() {
   }
 
   function openSession(session: SessionEntry) {
-    // Find recordings that fall within this session's time window
     const sessionRecordings = recordings.filter(r => {
       const t = new Date(r.date).getTime();
       return t >= session.started_at && t <= session.ended_at + 60_000;
@@ -378,33 +404,54 @@ export default function LogsScreen() {
         />
       </View>
 
-      {/* Tag filter */}
-      {allTags.length > 0 && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.tagFilterRow}
-          contentContainerStyle={styles.tagFilterContent}
+      {/* Sort controls */}
+      <View style={styles.sortRow}>
+        {(['recent', 'longest', 'type'] as SortOption[]).map(option => (
+          <Pressable
+            key={option}
+            onPress={() => setSortBy(option)}
+            style={[styles.sortPill, sortBy === option && styles.sortPillActive]}
+          >
+            <Text style={[styles.sortPillText, sortBy === option && styles.sortPillTextActive]}>
+              {option}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+
+      {/* Walk type filter */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.filterScrollRow}
+        contentContainerStyle={styles.filterScrollContent}
+      >
+        <Pressable
+          onPress={() => setFilterType(null)}
+          style={[styles.filterChip, filterType === null && styles.filterChipActive]}
         >
-          {allTags.map(tag => (
-            <Pressable
-              key={tag}
-              onPress={() => setSelectedTag(selectedTag === tag ? null : tag)}
-              style={[styles.tagPill, selectedTag === tag && styles.tagPillActive]}
-            >
-              <Text style={[styles.tagPillText, selectedTag === tag && styles.tagPillTextActive]}>
-                {tag}
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      )}
+          <Text style={[styles.filterChipText, filterType === null && styles.filterChipTextActive]}>
+            All
+          </Text>
+        </Pressable>
+        {VALID_WALK_TYPES.map(type => (
+          <Pressable
+            key={type}
+            onPress={() => setFilterType(prev => prev === type ? null : type)}
+            style={[styles.filterChip, filterType === type && styles.filterChipActive]}
+          >
+            <Text style={[styles.filterChipText, filterType === type && styles.filterChipTextActive]}>
+              {WALK_TYPE_LABELS[type]}
+            </Text>
+          </Pressable>
+        ))}
+      </ScrollView>
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {displayed.length === 0 ? (
+        {sorted.length === 0 ? (
           <View style={styles.emptyState}>
             {sessions.length === 0 ? (
               <>
@@ -413,30 +460,30 @@ export default function LogsScreen() {
                   Complete a walk to see your AI-generated logs here.
                 </Text>
               </>
-            ) : searchQuery.trim() ? (
-              <Text style={styles.emptyText}>No results for "{searchQuery}".</Text>
             ) : (
-              <Text style={styles.emptyText}>No "{selectedTag}" walks.</Text>
+              <Text style={styles.emptyText}>No results for "{searchQuery}".</Text>
             )}
           </View>
         ) : (
-          displayed.map(session => {
-            const recs        = sessionRecs(session);
-            const isAnalyzing = analyzingSessionId === session.id;
-            const hasAI       = session.title !== null;
-            const hasTranscripts = recs.some(r => r.transcript?.trim());
-            const canAnalyze  = !hasAI && !isAnalyzing && hasTranscripts;
+          sorted.map(session => {
+            const recs            = sessionRecs(session);
+            const isAnalyzing     = analyzingSessionId === session.id;
+            const hasAI           = session.title !== null;
+            const hasTranscripts  = recs.some(r => r.transcript?.trim());
+            const wt              = sessionWalkType(session, recordings);
+            const hasPendingSummary = !hasAI && !isAnalyzing && hasTranscripts;
             return (
               <SessionCard
                 key={session.id}
                 session={session}
                 durationMs={session.ended_at - session.started_at}
                 recordingCount={recs.length}
+                walkType={wt}
                 isAnalyzing={isAnalyzing}
+                hasPendingSummary={hasPendingSummary}
                 onPress={() => openSession(session)}
                 onLongPress={() => confirmDeleteSession(session)}
                 onShare={() => handleShare(session)}
-                onAnalyze={canAnalyze ? () => handleAnalyze(session) : null}
               />
             );
           })
@@ -469,7 +516,6 @@ const styles = StyleSheet.create({
     color:         C.text,
     letterSpacing: -0.5,
   },
-  // ── Search ───────────────────────────────────────────────────────────────
   searchRow: {
     flexDirection:     'row',
     alignItems:        'center',
@@ -487,15 +533,13 @@ const styles = StyleSheet.create({
     color:    C.text,
   },
 
-  // ── Tag filter ───────────────────────────────────────────────────────────
-  tagFilterRow: {
-    marginBottom: 8,
-  },
-  tagFilterContent: {
-    paddingHorizontal: 24,
+  sortRow: {
+    flexDirection:     'row',
     gap:                6,
+    paddingHorizontal: 24,
+    marginBottom:       10,
   },
-  tagPill: {
+  sortPill: {
     paddingHorizontal: 12,
     paddingVertical:    5,
     borderRadius:      20,
@@ -503,16 +547,45 @@ const styles = StyleSheet.create({
     borderWidth:       1,
     borderColor:       C.border,
   },
-  tagPillActive: {
+  sortPillActive: {
     backgroundColor: C.tint,
     borderColor:     C.tint,
   },
-  tagPillText: {
+  sortPillText: {
     fontSize:   12,
     color:      C.textSecondary,
     fontWeight: '500',
   },
-  tagPillTextActive: {
+  sortPillTextActive: {
+    color: C.text,
+  },
+
+  filterScrollRow: {
+    marginBottom: 10,
+  },
+  filterScrollContent: {
+    paddingHorizontal: 24,
+    gap:                6,
+    flexDirection:     'row',
+  },
+  filterChip: {
+    paddingHorizontal: 12,
+    paddingVertical:    5,
+    borderRadius:      20,
+    backgroundColor:   C.surface,
+    borderWidth:       1,
+    borderColor:       C.border,
+  },
+  filterChipActive: {
+    backgroundColor: C.tint,
+    borderColor:     C.tint,
+  },
+  filterChipText: {
+    fontSize:   12,
+    color:      C.textSecondary,
+    fontWeight: '500',
+  },
+  filterChipTextActive: {
     color: C.text,
   },
 

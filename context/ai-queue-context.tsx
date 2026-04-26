@@ -1,20 +1,3 @@
-/**
- * AI job queue — serialises Whisper transcription and Llama tagging so that
- * only one ExecuTorch model is active at a time.
- *
- * Architecture:
- *   AIQueueProvider maintains a simple FIFO queue of AIJob items.
- *   It renders a single invisible worker component (<TranscriptionWorker> or
- *   <LLMWorker>) based on the active job type.  The worker mounts its
- *   react-native-executorch hook, runs inference, then signals completion so
- *   the queue can advance.  Conditional *rendering* (not conditional hook
- *   calls) ensures only one model is initialised at a time.
- *
- * API assumptions for react-native-executorch (adjust if the published API differs):
- *   useSpeechToText — { transcribe(uri): void, isReady, isTranscribing, transcription, error }
- *   useLLM          — { forward(prompt): void, isReady, isGenerating, response, error }
- */
-
 import React, {
   createContext,
   useCallback,
@@ -45,7 +28,7 @@ import { useSessionsContext } from './sessions-context';
 
 export type TranscribeJob = { type: 'transcribe'; recordingId: string; uri: string };
 export type TagJob        = { type: 'tag'; recordingId: string; transcript: string };
-export type AnalyzeJob    = { type: 'analyze'; recordingId: string; sessionId: string; transcripts: string[] };
+export type AnalyzeJob    = { type: 'analyze'; recordingId: string; sessionId: string; transcripts: string[]; walkType: WalkType };
 export type AIJob         = TranscribeJob | TagJob | AnalyzeJob;
 
 type QueueState = { active: AIJob | null; pending: AIJob[] };
@@ -67,40 +50,73 @@ function queueReducer(state: QueueState, action: QueueAction): QueueState {
 }
 
 // ---------------------------------------------------------------------------
-// Constants
+// Walk types
 // ---------------------------------------------------------------------------
 
-const VALID_TAGS = ['idea', 'vent', 'gratitude', 'plan', 'reflection', 'question'] as const;
-export type Tag = typeof VALID_TAGS[number];
+const VALID_WALK_TYPES = ['vent', 'brainstorm', 'plan', 'reflect', 'appreciate', 'untangle'] as const;
+export type WalkType = typeof VALID_WALK_TYPES[number];
+
+export const WALK_TYPE_LABELS: Record<WalkType, string> = {
+  vent:       'Vent',
+  brainstorm: 'Brainstorm',
+  plan:       'Plan',
+  reflect:    'Reflect',
+  appreciate: 'Appreciate',
+  untangle:   'Untangle',
+};
 
 const TAG_SYSTEM_PROMPT =
-  'You are a voice journal tagger. Given a transcript, output 1-3 comma-separated tags ' +
-  'and nothing else. Choose only from: idea, vent, gratitude, plan, reflection, question. ' +
-  'Example: idea, plan';
+  'You are a walk journal classifier. Given a voice transcript, output exactly one word ' +
+  'that best describes the walk type. Choose only from: vent, brainstorm, plan, reflect, appreciate, untangle. ' +
+  'Output the single word only, nothing else.';
 
-function parseTags(response: string): Tag[] {
-  return response
-    .toLowerCase()
-    .split(/[\s,]+/)
-    .map(t => t.trim())
-    .filter((t): t is Tag => (VALID_TAGS as readonly string[]).includes(t))
-    .slice(0, 3);
+function parseWalkType(response: string): WalkType | null {
+  const words = response.toLowerCase().trim().split(/\s+/);
+  for (const word of words) {
+    if ((VALID_WALK_TYPES as readonly string[]).includes(word)) return word as WalkType;
+  }
+  return null;
 }
 
-// Single "mega-prompt" that generates title + key points + actions in one LLM pass,
-// avoiding a second model load and saving 5–10 s of inference latency.
-const ANALYZE_SYSTEM_PROMPT =
-  'You are a voice journal analyzer. Respond ONLY with a JSON object — no markdown, no explanation.\n\n' +
-  'Format: {"title":"5-word session title","key_points":["insight 1","insight 2"],"actions":["action 1"]}\n\n' +
-  'Rules:\n' +
-  '- title: max 5 words, captures the main theme\n' +
-  '- key_points: 2–5 complete-sentence insights, include names/places/decisions\n' +
-  '- actions: 0–3 action items starting with a verb (e.g. "Email Sarah about proposal"); use [] if none';
+// ---------------------------------------------------------------------------
+// Analysis prompts — one per walk type
+// ---------------------------------------------------------------------------
 
-type AnalysisResult = { title: string; keyPoints: string[]; actions: string[] };
+const ANALYZE_PROMPTS: Record<WalkType, string> = {
+  vent:
+    'You are a compassionate listener. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
+    'Format: {"title":"5-word title","summary":"2-3 sentences reflecting their core feeling. No advice.","key_points":[],"actions":[]}\n' +
+    'Rules: title max 5 words. summary captures the emotion expressed, not advice or next steps.',
+
+  brainstorm:
+    'You are an idea organizer. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
+    'Format: {"title":"5-word title","key_points":["idea 1","idea 2","idea 3"],"summary":null,"actions":[]}\n' +
+    'Rules: title max 5 words. key_points 3-7 distinct ideas. Capture every idea mentioned. Do not filter or evaluate.',
+
+  plan:
+    'You are a task extractor. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
+    'Format: {"title":"5-word title","actions":["Do X","Call Y"],"key_points":[],"summary":null}\n' +
+    'Rules: title max 5 words. actions 1-6 items starting with a verb. Only include explicit tasks or next steps.',
+
+  reflect:
+    'You are a thoughtful journal companion. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
+    'Format: {"title":"5-word title","summary":"2-4 sentences capturing the key insight.","key_points":[],"actions":[]}\n' +
+    'Rules: title max 5 words. summary synthesizes what they processed. No advice or forward projection.',
+
+  appreciate:
+    'You are a grateful observer. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
+    'Format: {"title":"5-word title","key_points":["Grateful for X","Appreciates Y"],"summary":null,"actions":[]}\n' +
+    'Rules: title max 5 words. key_points 2-6 specific things they expressed appreciation for.',
+
+  untangle:
+    'You are a clear-headed advisor. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
+    'Format: {"title":"5-word title","key_points":["Option: X","Option: Y"],"summary":"What they seem to lean toward, or null if unclear.","actions":[]}\n' +
+    'Rules: title max 5 words, names the decision. key_points lists the options. summary is their leaning, not your opinion.',
+};
+
+type AnalysisResult = { title: string; keyPoints: string[]; actions: string[]; summary: string | null };
 
 function parseAnalysisResponse(response: string): AnalysisResult {
-  // Strip markdown code fences LLaMA sometimes emits
   const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
 
   try {
@@ -113,25 +129,24 @@ function parseAnalysisResponse(response: string): AnalysisResult {
       actions: Array.isArray(parsed.actions)
         ? parsed.actions.filter((s: unknown): s is string => typeof s === 'string')
         : [],
+      summary: typeof parsed.summary === 'string' ? parsed.summary.trim() : null,
     };
   } catch {
-    // Regex fallback for imperfect JSON output from smaller models
-    const titleMatch    = cleaned.match(/"title"\s*:\s*"([^"]+)"/);
-    const keyPointsRaw  = cleaned.match(/"key_points"\s*:\s*\[([^\]]*)\]/s);
-    const actionsRaw    = cleaned.match(/"actions"\s*:\s*\[([^\]]*)\]/s);
+    const titleMatch   = cleaned.match(/"title"\s*:\s*"([^"]+)"/);
+    const keyPointsRaw = cleaned.match(/"key_points"\s*:\s*\[([^\]]*)\]/s);
+    const actionsRaw   = cleaned.match(/"actions"\s*:\s*\[([^\]]*)\]/s);
+    const summaryMatch = cleaned.match(/"summary"\s*:\s*"([^"]+)"/);
     const extractStrings = (raw: string | undefined): string[] =>
       raw ? [...raw.matchAll(/"([^"]+)"/g)].map(m => m[1]).filter(Boolean) : [];
     return {
       title:     titleMatch?.[1]?.trim() ?? '',
       keyPoints: extractStrings(keyPointsRaw?.[1]),
       actions:   extractStrings(actionsRaw?.[1]),
+      summary:   summaryMatch?.[1]?.trim() ?? null,
     };
   }
 }
 
-// Adds key→value to a record, evicting the lexicographically smallest key when
-// the entry count would exceed limit. Recording/session IDs are timestamp-prefixed
-// so the smallest key is always the oldest.
 function cappedMapAdd<T>(prev: Record<string, T>, key: string, value: T, limit: number): Record<string, T> {
   const next = { ...prev, [key]: value };
   const keys = Object.keys(next);
@@ -148,7 +163,7 @@ function cappedMapAdd<T>(prev: Record<string, T>, key: string, value: T, limit: 
 function extractInt16PCM(view: DataView, start: number, end: number): number[] {
   const pcm: number[] = [];
   for (let i = start; i + 1 < end; i += 2) {
-    pcm.push(view.getInt16(i, true) / 32768); // little-endian Int16 → float32 [-1,1]
+    pcm.push(view.getInt16(i, true) / 32768);
   }
   return pcm;
 }
@@ -161,7 +176,6 @@ function extractFloat32PCM(view: DataView, start: number, end: number): number[]
   return pcm;
 }
 
-// Linear interpolation resample — avoids aliasing artifacts from nearest-neighbour
 function resampleTo16k(pcm: number[], fromRate: number): number[] {
   if (fromRate === 16000) return pcm;
   const ratio = fromRate / 16000;
@@ -177,7 +191,6 @@ function resampleTo16k(pcm: number[], fromRate: number): number[] {
 }
 
 async function decodeAudioToPCM(uri: string): Promise<number[]> {
-  // fetch() handles file:// URIs reliably across path formats on React Native
   let raw: Uint8Array | null = null;
   for (let i = 0; i < 10; i++) {
     const res = await fetch(uri);
@@ -191,8 +204,6 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
   const buffer = raw.buffer;
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
-  // Release the Uint8Array wrapper — bytes/view keep the ArrayBuffer alive, but
-  // dropping raw lets the GC reclaim this reference before the pcm[] grows.
   raw = null;
 
   if (bytes.length < 8) throw new Error(`File too small: ${bytes.length} bytes`);
@@ -202,16 +213,15 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
     if (bytes.length < 12) throw new Error('WAV file truncated');
     let offset = 12;
     let dataOffset = -1, dataSize = 0;
-    // fmt defaults (fallback if fmt chunk missing)
     let audioFormat = 1, numChannels = 1, sampleRate = 16000, bitsPerSample = 16;
 
     while (offset + 8 <= bytes.length) {
       const id = String.fromCharCode(bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]);
       const size = view.getUint32(offset + 4, true);
       if (id === 'fmt ' && size >= 16) {
-        audioFormat  = view.getUint16(offset + 8,  true); // 1=PCM, 3=IEEE float
-        numChannels  = view.getUint16(offset + 10, true);
-        sampleRate   = view.getUint32(offset + 12, true);
+        audioFormat   = view.getUint16(offset + 8,  true);
+        numChannels   = view.getUint16(offset + 10, true);
+        sampleRate    = view.getUint32(offset + 12, true);
         bitsPerSample = view.getUint16(offset + 22, true);
       }
       if (id === 'data') { dataOffset = offset + 8; dataSize = size; break; }
@@ -223,7 +233,6 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
     let pcm: number[];
 
     if (audioFormat === 3 || bitsPerSample === 32) {
-      // IEEE 754 32-bit float PCM (format 3) or 32-bit reported as PCM
       const floatSamples = extractFloat32PCM(view, dataOffset, end);
       if (numChannels === 2) {
         pcm = [];
@@ -232,7 +241,6 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
         pcm = floatSamples;
       }
     } else {
-      // 16-bit integer PCM (most common)
       pcm = extractInt16PCM(view, dataOffset, end);
       if (numChannels === 2) {
         const mono: number[] = [];
@@ -246,7 +254,6 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
   if (magic === 'caff') {
     let offset = 8;
     const log: string[] = [];
-    // desc chunk values — defaults match our recording options
     let cafSampleRate = 16000;
     let cafChannels = 1;
     let cafBitsPerChannel = 16;
@@ -261,23 +268,15 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
       log.push(`${id}(${streaming ? 'stream' : size})`);
 
       if (id === 'desc' && size >= 32) {
-        // AudioStreamBasicDescription layout (big-endian, chunk data starts at offset+12):
-        //   +0  sampleRate        float64  → offset+12
-        //   +8  formatID          uint32   → offset+20
-        //   +12 formatFlags       uint32   → offset+24  (bit 0 = kAudioFormatFlagIsFloat)
-        //   +16 bytesPerPacket    uint32   → offset+28
-        //   +20 framesPerPacket   uint32   → offset+32
-        //   +24 channelsPerFrame  uint32   → offset+36
-        //   +28 bitsPerChannel    uint32   → offset+40
-        cafSampleRate = view.getFloat64(offset + 12, false);
+        cafSampleRate     = view.getFloat64(offset + 12, false);
         const formatFlags = view.getUint32(offset + 24, false);
-        cafIsFloat = (formatFlags & 0x1) !== 0;
-        cafChannels = view.getUint32(offset + 36, false);
+        cafIsFloat        = (formatFlags & 0x1) !== 0;
+        cafChannels       = view.getUint32(offset + 36, false);
         cafBitsPerChannel = view.getUint32(offset + 40, false);
       }
 
       if (id === 'data') {
-        const dataStart = offset + 12 + 4; // skip 4-byte edit count
+        const dataStart = offset + 12 + 4;
         const dataEnd = streaming ? bytes.length : Math.min(offset + 12 + size, bytes.length);
         let pcm: number[];
         if (cafIsFloat || cafBitsPerChannel === 32) {
@@ -305,8 +304,6 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
     throw new Error(`No CAF data chunk: file=${bytes.length}b chunks=[${log.join(',')}]`);
   }
 
-  // m4a/AAC (Android) — decode via react-native-audio-api (Web Audio API).
-  // Install: npx expo install react-native-audio-api  →  then EAS Build.
   if (magic === 'ftyp') {
     try {
       const { AudioContext } = require('react-native-audio-api');
@@ -345,12 +342,11 @@ function TranscriptionWorker({
     decoderSource: MOONSHINE_TINY_DECODER,
     tokenizerSource: MOONSHINE_TOKENIZER,
   });
-  // Capture job ID when transcription starts — never rely on the job prop
-  // at completion time since React 18 batching can null it out in the same render
-  const pendingIdRef = useRef<string | null>(null);
+  const pendingIdRef    = useRef<string | null>(null);
   const wasGeneratingRef = useRef(false);
-  const sequenceRef = useRef('');
-  sequenceRef.current = sequence;
+  const calledErrorRef  = useRef(false);
+  const sequenceRef     = useRef('');
+  sequenceRef.current   = sequence;
 
   useEffect(() => {
     onProgress(downloadProgress);
@@ -361,40 +357,41 @@ function TranscriptionWorker({
   }, [isReady, onReady]);
 
   useEffect(() => {
-    if (error) onError(error.message ?? String(error));
+    if (error && !calledErrorRef.current) {
+      calledErrorRef.current = true;
+      pendingIdRef.current = null;
+      wasGeneratingRef.current = false;
+      onError(error.message ?? String(error));
+    }
   }, [error, onError]);
 
   useEffect(() => {
     if (!isReady || !job || pendingIdRef.current === job.recordingId) return;
     pendingIdRef.current = job.recordingId;
+    calledErrorRef.current = false;
     const id = job.recordingId;
     (async () => {
       try {
         const pcm = await decodeAudioToPCM(job.uri);
         if (pcm.length === 0) {
-          onError('WAV decode produced empty PCM — check file at: ' + job.uri);
           pendingIdRef.current = null;
-          return; // onError already advances the queue
+          onError('WAV decode produced empty PCM — check file at: ' + job.uri);
+          return;
         }
-        // < 0.2 s at 16 kHz — too short for Moonshine to produce meaningful output
         if (pcm.length < 3200) {
           pendingIdRef.current = null;
           onDone(id, '');
           return;
         }
-        // Peak-normalise in-place so quiet recordings (phone in pocket, arm at side)
-        // land in the amplitude range Moonshine was trained on. In-place avoids
-        // allocating a second ~38 MB array alongside the first. Skip if near-silent
-        // to avoid amplifying pure noise.
         const peak = pcm.reduce((m, s) => Math.max(m, Math.abs(s)), 0);
         if (peak > 0.01) {
           for (let i = 0; i < pcm.length; i++) pcm[i] /= peak;
         }
         transcribe(pcm);
       } catch (e) {
-        onError(e instanceof Error ? e.message : String(e));
         pendingIdRef.current = null;
-        // onError already advances the queue — don't also call onDone
+        wasGeneratingRef.current = false;
+        onError(e instanceof Error ? e.message : String(e));
       }
     })();
   }, [isReady, job, transcribe, onDone, onError]);
@@ -426,12 +423,12 @@ function TagWorker({
     tokenizerSource: LLAMA3_2_1B_TOKENIZER,
     tokenizerConfigSource: LLAMA3_2_TOKENIZER_CONFIG,
   });
-  const startedRef      = useRef(false);
+  const startedRef       = useRef(false);
   const wasGeneratingRef = useRef(false);
-  const pendingIdRef    = useRef<string | null>(null);
-  const calledDoneRef   = useRef(false);
-  const responseRef     = useRef('');
-  responseRef.current   = response ?? '';
+  const pendingIdRef     = useRef<string | null>(null);
+  const calledDoneRef    = useRef(false);
+  const responseRef      = useRef('');
+  responseRef.current    = response ?? '';
 
   function callDoneOnce(id: string, res: string) {
     if (calledDoneRef.current) return;
@@ -459,8 +456,6 @@ function TagWorker({
     }
   }, [isGenerating, onDone]);
 
-  // If the LLM errors (model download failed, inference error, etc.)
-  // advance the queue so it isn't blocked forever.
   useEffect(() => {
     if (!error) return;
     callDoneOnce(recordingId, '');
@@ -502,7 +497,7 @@ function AnalyzeWorker({
       .map((t, i) => `[${i + 1}]: ${t}`)
       .join('\n');
     generate([
-      { role: 'system', content: ANALYZE_SYSTEM_PROMPT },
+      { role: 'system', content: ANALYZE_PROMPTS[job.walkType] },
       { role: 'user',   content: `Analyze these voice notes:\n\n${userMessage}` },
     ]);
   }, [isReady, generate, job]);
@@ -517,8 +512,6 @@ function AnalyzeWorker({
     }
   }, [isGenerating, onDone]);
 
-  // If the LLM errors (model download failed, inference error, context too long, etc.)
-  // advance the queue so it isn't blocked forever.
   useEffect(() => {
     if (!error) return;
     callDoneOnce(job.sessionId, '');
@@ -533,15 +526,13 @@ function AnalyzeWorker({
 
 type AIQueueCtx = {
   enqueueTranscription: (recordingId: string, uri: string) => void;
-  enqueueAnalysis: (sessionId: string, transcripts: string[]) => void;
+  enqueueAnalysis: (sessionId: string, transcripts: string[], walkType: WalkType) => void;
+  cancelAnalysis: (sessionId: string) => void;
   processingId: string | null;
   processingType: 'transcribe' | 'tag' | 'analyze' | null;
   modelDownloadProgress: number;
   isModelReady: boolean;
   modelError: string | null;
-  suggestedTagsMap: Record<string, Tag[]>;
-  acceptSuggestion: (recordingId: string, tags: Tag[]) => Promise<void>;
-  dismissSuggestion: (recordingId: string) => void;
   failedIds: ReadonlySet<string>;
   queuedIds: ReadonlySet<string>;
   analyzingSessionId: string | null;
@@ -550,24 +541,22 @@ type AIQueueCtx = {
 const AIQueueContext = createContext<AIQueueCtx | null>(null);
 
 export function AIQueueProvider({ children }: PropsWithChildren) {
-  const { updateRecording } = useRecordingsContext();
-  const { updateSession } = useSessionsContext();
-  const [queue, dispatch] = useReducer(queueReducer, { active: null, pending: [] });
-  const [suggestedTagsMap, setSuggestedTagsMap] = useState<Record<string, Tag[]>>({});
+  const { updateRecording }        = useRecordingsContext();
+  const { updateSession }          = useSessionsContext();
+  const [queue, dispatch]          = useReducer(queueReducer, { active: null, pending: [] });
   const [modelDownloadProgress, setModelDownloadProgress] = useState(0);
-  const [isModelReady, setIsModelReady] = useState(false);
-  const [modelError, setModelError] = useState<string | null>(null);
-  const [failedIds, setFailedIds] = useState<Set<string>>(new Set());
+  const [isModelReady, setIsModelReady]                   = useState(false);
+  const [modelError, setModelError]                       = useState<string | null>(null);
+  const [failedIds, setFailedIds]                         = useState<Set<string>>(new Set());
 
-  // Ref so memoised callbacks always call the latest dispatch without re-memoising
-  const dispatchRef = useRef(dispatch);
-  dispatchRef.current = dispatch;
+  const dispatchRef          = useRef(dispatch);
+  dispatchRef.current        = dispatch;
+  const cancelledAnalysisRef  = useRef<Set<string>>(new Set());
+  const moonshineEverReadyRef = useRef(false);
 
   const handleError = useCallback(
     (err: string) => {
       setModelError(err);
-      // Mark the active job's recording as failed and advance the queue so
-      // subsequent recordings are not permanently blocked.
       const active = queue.active;
       if (active) {
         setFailedIds(prev => new Set([...prev, active.recordingId]));
@@ -578,13 +567,22 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
     [queue.active, updateRecording]
   );
 
+  const handleModelReady = useCallback((ready: boolean) => {
+    if (ready) moonshineEverReadyRef.current = true;
+    setIsModelReady(moonshineEverReadyRef.current || ready);
+  }, []);
+
   const handleTranscriptionDone = useCallback(
     async (recordingId: string, transcript: string) => {
-      await updateRecording(recordingId, { transcript: transcript || '', transcript_edited: 0 });
-      setFailedIds(prev => { const n = new Set(prev); n.delete(recordingId); return n; });
-      if (transcript.trim()) {
-        dispatchRef.current({ type: 'NEXT', insertFront: { type: 'tag', recordingId, transcript } });
-      } else {
+      try {
+        await updateRecording(recordingId, { transcript: transcript || '', transcript_edited: 0 });
+        setFailedIds(prev => { const n = new Set(prev); n.delete(recordingId); return n; });
+        if (transcript.trim()) {
+          dispatchRef.current({ type: 'NEXT', insertFront: { type: 'tag', recordingId, transcript } });
+        } else {
+          dispatchRef.current({ type: 'NEXT' });
+        }
+      } catch {
         dispatchRef.current({ type: 'NEXT' });
       }
     },
@@ -592,23 +590,29 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   );
 
   const handleTagsDone = useCallback(
-    (recordingId: string, response: string) => {
-      const tags = parseTags(response);
-      if (tags.length > 0) {
-        setSuggestedTagsMap(prev => cappedMapAdd(prev, recordingId, tags, 20));
+    async (recordingId: string, response: string) => {
+      const walkType = parseWalkType(response);
+      if (walkType) {
+        await updateRecording(recordingId, { tags: walkType });
       }
       dispatchRef.current({ type: 'NEXT' });
     },
-    []
+    [updateRecording]
   );
 
   const handleAnalyzeDone = useCallback(
     (sessionId: string, response: string) => {
-      const { title, keyPoints, actions } = parseAnalysisResponse(response);
+      if (cancelledAnalysisRef.current.has(sessionId)) {
+        cancelledAnalysisRef.current.delete(sessionId);
+        dispatchRef.current({ type: 'NEXT' });
+        return;
+      }
+      const { title, keyPoints, actions, summary } = parseAnalysisResponse(response);
       updateSession(sessionId, {
         title:      title || null,
         key_points: keyPoints.length > 0 ? JSON.stringify(keyPoints) : null,
         actions:    actions.length   > 0 ? JSON.stringify(actions)   : null,
+        summary:    summary || null,
       });
       if (title) {
         try {
@@ -629,17 +633,12 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
     dispatch({ type: 'PUSH', job: { type: 'transcribe', recordingId, uri } });
   }
 
-  function enqueueAnalysis(sessionId: string, transcripts: string[]) {
-    dispatch({ type: 'PUSH', job: { type: 'analyze', recordingId: sessionId, sessionId, transcripts } });
+  function enqueueAnalysis(sessionId: string, transcripts: string[], walkType: WalkType) {
+    dispatch({ type: 'PUSH', job: { type: 'analyze', recordingId: sessionId, sessionId, transcripts, walkType } });
   }
 
-  async function acceptSuggestion(recordingId: string, tags: Tag[]) {
-    await updateRecording(recordingId, { tags: tags.join(',') });
-    setSuggestedTagsMap(prev => { const n = { ...prev }; delete n[recordingId]; return n; });
-  }
-
-  function dismissSuggestion(recordingId: string) {
-    setSuggestedTagsMap(prev => { const n = { ...prev }; delete n[recordingId]; return n; });
+  function cancelAnalysis(sessionId: string) {
+    cancelledAnalysisRef.current.add(sessionId);
   }
 
   const queuedIds = new Set(
@@ -651,14 +650,12 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   const value: AIQueueCtx = {
     enqueueTranscription,
     enqueueAnalysis,
-    processingId: queue.active?.recordingId ?? null,
-    processingType: queue.active?.type ?? null,
+    cancelAnalysis,
+    processingId:         queue.active?.recordingId ?? null,
+    processingType:       queue.active?.type ?? null,
     modelDownloadProgress,
     isModelReady,
     modelError,
-    suggestedTagsMap,
-    acceptSuggestion,
-    dismissSuggestion,
     failedIds,
     queuedIds,
     analyzingSessionId: queue.active?.type === 'analyze' ? queue.active.sessionId : null,
@@ -667,13 +664,15 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   return (
     <AIQueueContext.Provider value={value}>
       {children}
-      <TranscriptionWorker
-        job={queue.active?.type === 'transcribe' ? queue.active : null}
-        onDone={handleTranscriptionDone}
-        onProgress={setModelDownloadProgress}
-        onReady={setIsModelReady}
-        onError={handleError}
-      />
+      {queue.active?.type !== 'tag' && queue.active?.type !== 'analyze' && (
+        <TranscriptionWorker
+          job={queue.active?.type === 'transcribe' ? queue.active : null}
+          onDone={handleTranscriptionDone}
+          onProgress={setModelDownloadProgress}
+          onReady={handleModelReady}
+          onError={handleError}
+        />
+      )}
       {queue.active?.type === 'tag' && (
         <TagWorker
           recordingId={queue.active.recordingId}
@@ -697,4 +696,4 @@ export function useAIQueue(): AIQueueCtx {
   return ctx;
 }
 
-export { VALID_TAGS };
+export { VALID_WALK_TYPES };
