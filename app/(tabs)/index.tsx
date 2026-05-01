@@ -270,6 +270,7 @@ export default function HomeScreen() {
           if (cancelled || !isSessionActiveRef.current) return;
           const snapshot = await endSession(stepCountRef.current);
           if (!snapshot) return;
+          if (snapshot.recordingIds.length === 0) return;
           await addSession({
             id: snapshot.startedAt.toString(),
             started_at: snapshot.startedAt,

@@ -77,7 +77,9 @@
           "remindersPermission": "Stride needs Reminders access to add your action items."
         }
       ],
-      "@sentry/react-native"
+      "@sentry/react-native",
+      "expo-web-browser",
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
-  Alert,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -10,6 +10,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import Swipeable from 'react-native-gesture-handler/Swipeable';
 import { useRouter } from 'expo-router';
 
 import { C } from '@/constants/theme';
@@ -89,7 +90,6 @@ type CardProps = {
   isAnalyzing:    boolean;
   hasPendingSummary: boolean;
   onPress:        () => void;
-  onLongPress:    () => void;
   onShare:        () => void;
 };
 
@@ -101,7 +101,6 @@ function SessionCard({
   isAnalyzing,
   hasPendingSummary,
   onPress,
-  onLongPress,
   onShare,
 }: CardProps) {
   const keyPoints = parseJsonArray(session.key_points);
@@ -109,7 +108,7 @@ function SessionCard({
   const preview   = keyPoints[0] ?? null;
 
   return (
-    <Pressable style={cardStyles.card} onPress={onPress} onLongPress={onLongPress}>
+    <Pressable style={cardStyles.card} onPress={onPress}>
       {/* Top row: title + duration */}
       <View style={cardStyles.topRow}>
         <Text style={cardStyles.title} numberOfLines={1}>
@@ -272,6 +271,8 @@ export default function LogsScreen() {
   const [sortBy, setSortBy]           = useState<SortOption>('recent');
   const [filterType, setFilterType]   = useState<WalkType | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [showSheet, setShowSheet]     = useState(false);
+  const swipeableRefs                 = useRef<Map<string, Swipeable>>(new Map());
 
   function sessionRecs(session: SessionEntry) {
     return recordings.filter(r => {
@@ -294,7 +295,7 @@ export default function LogsScreen() {
 
   const sorted = sortBy === 'longest'
     ? [...filtered].sort((a, b) => (b.ended_at - b.started_at) - (a.ended_at - a.started_at))
-    : filtered; // 'recent' — already sorted by started_at DESC from SQLite
+    : filtered;
 
   function handleShare(session: SessionEntry) {
     const recs       = sessionRecs(session);
@@ -343,17 +344,6 @@ export default function LogsScreen() {
     Share.share({ message: lines.join('\n').trim() });
   }
 
-  function confirmDeleteSession(session: SessionEntry) {
-    Alert.alert(
-      'Delete walk?',
-      'Removes this walk and its AI summary. Recorded thoughts are kept.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete', style: 'destructive', onPress: () => deleteSession(session.id) },
-      ]
-    );
-  }
-
   function openSession(session: SessionEntry) {
     const sessionRecordings = recordings.filter(r => {
       const t = new Date(r.date).getTime();
@@ -393,43 +383,56 @@ export default function LogsScreen() {
           />
         </View>
         <Pressable
-          style={styles.sortButton}
-          onPress={() => setSortBy(prev => prev === 'recent' ? 'longest' : 'recent')}
+          style={[styles.sortButton, (filterType !== null) && styles.sortButtonFiltered]}
+          onPress={() => setShowSheet(true)}
         >
-          <IconSymbol name="arrow.up.arrow.down" size={11} color={C.textSecondary} />
-          <Text style={styles.sortButtonText}>
-            {sortBy === 'recent' ? 'Recent' : 'Longest'}
+          <IconSymbol
+            name="line.3.horizontal.decrease"
+            size={12}
+            color={filterType !== null ? C.tint : C.textSecondary}
+          />
+          <Text style={[styles.sortButtonText, filterType !== null && styles.sortButtonTextFiltered]}>
+            {filterType !== null ? WALK_TYPE_LABELS[filterType] : sortBy === 'recent' ? 'Recent' : 'Longest'}
           </Text>
         </Pressable>
       </View>
 
-      {/* Walk type filter */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.filterScrollRow}
-        contentContainerStyle={styles.filterScrollContent}
+      {/* Sort & Filter sheet */}
+      <Modal
+        visible={showSheet}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowSheet(false)}
       >
-        <Pressable
-          onPress={() => setFilterType(null)}
-          style={[styles.filterChip, filterType === null && styles.filterChipActive]}
-        >
-          <Text style={[styles.filterChipText, filterType === null && styles.filterChipTextActive]}>
-            All
-          </Text>
-        </Pressable>
-        {VALID_WALK_TYPES.map(type => (
-          <Pressable
-            key={type}
-            onPress={() => setFilterType(prev => prev === type ? null : type)}
-            style={[styles.filterChip, filterType === type && styles.filterChipActive]}
-          >
-            <Text style={[styles.filterChipText, filterType === type && styles.filterChipTextActive]}>
-              {WALK_TYPE_LABELS[type]}
-            </Text>
+        <Pressable style={styles.sheetBackdrop} onPress={() => setShowSheet(false)} />
+        <View style={styles.sheet}>
+          <View style={styles.sheetHandle} />
+
+          <Text style={styles.sheetSectionHeader}>SORT</Text>
+          {([['recent', 'Recent'], ['longest', 'Longest']] as [SortOption, string][]).map(([val, label]) => (
+            <Pressable key={val} style={styles.sheetRow} onPress={() => setSortBy(val)}>
+              <Text style={styles.sheetRowLabel}>{label}</Text>
+              {sortBy === val && <IconSymbol name="checkmark" size={14} color={C.tint} />}
+            </Pressable>
+          ))}
+
+          <Text style={styles.sheetSectionHeader}>FILTER BY TYPE</Text>
+          <Pressable style={styles.sheetRow} onPress={() => setFilterType(null)}>
+            <Text style={styles.sheetRowLabel}>All walks</Text>
+            {filterType === null && <IconSymbol name="checkmark" size={14} color={C.tint} />}
           </Pressable>
-        ))}
-      </ScrollView>
+          {VALID_WALK_TYPES.map(type => (
+            <Pressable
+              key={type}
+              style={styles.sheetRow}
+              onPress={() => setFilterType(prev => prev === type ? null : type)}
+            >
+              <Text style={styles.sheetRowLabel}>{WALK_TYPE_LABELS[type]}</Text>
+              {filterType === type && <IconSymbol name="checkmark" size={14} color={C.tint} />}
+            </Pressable>
+          ))}
+        </View>
+      </Modal>
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
@@ -456,19 +459,39 @@ export default function LogsScreen() {
             const hasTranscripts  = recs.some(r => r.transcript?.trim());
             const wt              = sessionWalkType(session, recordings);
             const hasPendingSummary = !hasAI && !isAnalyzing && hasTranscripts;
+            const renderDelete = () => (
+              <Pressable
+                style={styles.deleteAction}
+                onPress={() => {
+                  swipeableRefs.current.get(session.id)?.close();
+                  deleteSession(session.id);
+                }}
+              >
+                <IconSymbol name="trash.fill" size={20} color={C.text} />
+              </Pressable>
+            );
             return (
-              <SessionCard
+              <Swipeable
                 key={session.id}
-                session={session}
-                durationMs={session.ended_at - session.started_at}
-                recordingCount={recs.length}
-                walkType={wt}
-                isAnalyzing={isAnalyzing}
-                hasPendingSummary={hasPendingSummary}
-                onPress={() => openSession(session)}
-                onLongPress={() => confirmDeleteSession(session)}
-                onShare={() => handleShare(session)}
-              />
+                ref={ref => {
+                  if (ref) swipeableRefs.current.set(session.id, ref);
+                  else swipeableRefs.current.delete(session.id);
+                }}
+                renderRightActions={renderDelete}
+                friction={2}
+                rightThreshold={60}
+              >
+                <SessionCard
+                  session={session}
+                  durationMs={session.ended_at - session.started_at}
+                  recordingCount={recs.length}
+                  walkType={wt}
+                  isAnalyzing={isAnalyzing}
+                  hasPendingSummary={hasPendingSummary}
+                  onPress={() => openSession(session)}
+                  onShare={() => handleShare(session)}
+                />
+              </Swipeable>
             );
           })
         )}
@@ -536,34 +559,62 @@ const styles = StyleSheet.create({
     color:      C.textSecondary,
     fontWeight: '500',
   },
+  sortButtonFiltered: {
+    borderWidth: 1,
+    borderColor: C.tint,
+  },
+  sortButtonTextFiltered: {
+    color: C.tint,
+  },
 
-  filterScrollRow: {
-    marginBottom: 10,
+  sheetBackdrop: {
+    flex:            1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
   },
-  filterScrollContent: {
-    paddingHorizontal: 24,
-    gap:                6,
+  sheet: {
+    backgroundColor: C.surface,
+    borderTopLeftRadius:  20,
+    borderTopRightRadius: 20,
+    paddingBottom:   40,
+  },
+  sheetHandle: {
+    width:           36,
+    height:           4,
+    borderRadius:     2,
+    backgroundColor: C.surfaceHigh,
+    alignSelf:       'center',
+    marginTop:       12,
+    marginBottom:     8,
+  },
+  sheetSectionHeader: {
+    fontSize:      11,
+    fontWeight:    '600',
+    color:         C.textTertiary,
+    letterSpacing: 1.2,
+    marginTop:     16,
+    marginBottom:   4,
+    paddingHorizontal: 20,
+  },
+  sheetRow: {
     flexDirection:     'row',
+    alignItems:        'center',
+    justifyContent:    'space-between',
+    paddingHorizontal: 20,
+    paddingVertical:   14,
   },
-  filterChip: {
-    paddingHorizontal: 12,
-    paddingVertical:    5,
-    borderRadius:      20,
-    backgroundColor:   C.surface,
-    borderWidth:       1,
-    borderColor:       C.border,
+  sheetRowLabel: {
+    fontSize:   16,
+    color:      C.text,
   },
-  filterChipActive: {
-    backgroundColor: C.tint,
-    borderColor:     C.tint,
-  },
-  filterChipText: {
-    fontSize:   12,
-    color:      C.textSecondary,
-    fontWeight: '500',
-  },
-  filterChipTextActive: {
-    color: C.text,
+
+  deleteAction: {
+    backgroundColor:        C.red,
+    justifyContent:         'center',
+    alignItems:             'center',
+    width:                  72,
+    marginBottom:           12,
+    marginLeft:             8,
+    borderRadius:           14,
   },
 
   scrollContent: {
