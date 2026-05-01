@@ -82,7 +82,8 @@ const TAG_SYSTEM_PROMPT =
 function parseWalkType(response: string): WalkType | null {
   const words = response.toLowerCase().trim().split(/\s+/);
   for (const word of words) {
-    if ((VALID_WALK_TYPES as readonly string[]).includes(word)) return word as WalkType;
+    const clean = word.replace(/[^a-z]/g, '');
+    if ((VALID_WALK_TYPES as readonly string[]).includes(clean)) return clean as WalkType;
   }
   return null;
 }
@@ -441,10 +442,12 @@ function TagWorker({
   recordingId,
   transcript,
   onDone,
+  onError,
 }: {
   recordingId: string;
   transcript: string;
   onDone: (recordingId: string, response: string) => void;
+  onError: (err: string) => void;
 }) {
   const { generate, isReady, isGenerating, response, error } = useLLM({
     modelSource: LLAMA3_2_1B_QLORA,
@@ -468,11 +471,17 @@ function TagWorker({
     if (!isReady || startedRef.current) return;
     startedRef.current = true;
     pendingIdRef.current = recordingId;
-    generate([
-      { role: 'system', content: TAG_SYSTEM_PROMPT },
-      { role: 'user',   content: transcript },
-    ]);
-  }, [isReady, generate, transcript, recordingId]);
+    try {
+      generate([
+        { role: 'system', content: TAG_SYSTEM_PROMPT },
+        { role: 'user',   content: transcript },
+      ]);
+    } catch (e) {
+      pendingIdRef.current = null;
+      startedRef.current = false;
+      onError(e instanceof Error ? e.message : String(e));
+    }
+  }, [isReady, generate, transcript, recordingId, onError]);
 
   useEffect(() => {
     if (isGenerating) { wasGeneratingRef.current = true; return; }
@@ -495,9 +504,11 @@ function TagWorker({
 function AnalyzeWorker({
   job,
   onDone,
+  onError,
 }: {
   job: AnalyzeJob;
-  onDone: (sessionId: string, response: string) => void;
+  onDone: (sessionId: string, response: string, walkType: WalkType) => void;
+  onError: (err: string) => void;
 }) {
   const { generate, isReady, isGenerating, response, error } = useLLM({
     modelSource: LLAMA3_2_1B_QLORA,
@@ -514,7 +525,7 @@ function AnalyzeWorker({
   function callDoneOnce(id: string, res: string) {
     if (calledDoneRef.current) return;
     calledDoneRef.current = true;
-    onDone(id, res);
+    onDone(id, res, job.walkType);
   }
 
   useEffect(() => {
@@ -524,11 +535,17 @@ function AnalyzeWorker({
     const userMessage = job.transcripts
       .map((t, i) => `[${i + 1}]: ${t}`)
       .join('\n');
-    generate([
-      { role: 'system', content: ANALYZE_PROMPTS[job.walkType] },
-      { role: 'user',   content: `Analyze these voice notes:\n\n${userMessage}` },
-    ]);
-  }, [isReady, generate, job]);
+    try {
+      generate([
+        { role: 'system', content: ANALYZE_PROMPTS[job.walkType] },
+        { role: 'user',   content: `Analyze these voice notes:\n\n${userMessage}` },
+      ]);
+    } catch (e) {
+      pendingIdRef.current = null;
+      startedRef.current = false;
+      onError(e instanceof Error ? e.message : String(e));
+    }
+  }, [isReady, generate, job, onError]);
 
   useEffect(() => {
     if (isGenerating) { wasGeneratingRef.current = true; return; }
@@ -583,19 +600,23 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   const moonshineEverReadyRef = useRef(false);
   const mountedRef            = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
+  const activeJobRef          = useRef<AIJob | null>(null);
+  activeJobRef.current        = queue.active;
 
   const handleError = useCallback(
     (err: string) => {
       if (!mountedRef.current) return;
       setModelError(err);
-      const active = queue.active;
+      const active = activeJobRef.current;
       if (active) {
         setFailedIds(prev => new Set([...prev, active.recordingId]));
-        updateRecording(active.recordingId, { transcript: '' });
+        if (active.type === 'transcribe') {
+          updateRecording(active.recordingId, { transcript: '' });
+        }
         dispatchRef.current({ type: 'NEXT' });
       }
     },
-    [queue.active, updateRecording]
+    [updateRecording]
   );
 
   const handleModelReady = useCallback((ready: boolean) => {
@@ -638,7 +659,7 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   );
 
   const handleAnalyzeDone = useCallback(
-    async (sessionId: string, response: string) => {
+    async (sessionId: string, response: string, walkType: WalkType) => {
       if (!mountedRef.current) return;
       if (cancelledAnalysisRef.current.has(sessionId)) {
         cancelledAnalysisRef.current.delete(sessionId);
@@ -652,6 +673,7 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
           key_points: keyPoints.length > 0 ? JSON.stringify(keyPoints) : null,
           actions:    actions.length   > 0 ? JSON.stringify(actions)   : null,
           summary:    summary || null,
+          walk_type:  walkType,
         });
         if (title) {
           try {
@@ -722,6 +744,7 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
             recordingId={queue.active.recordingId}
             transcript={queue.active.transcript}
             onDone={handleTagsDone}
+            onError={handleError}
           />
         </AIWorkerErrorBoundary>
       )}
@@ -730,6 +753,7 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
           <AnalyzeWorker
             job={queue.active}
             onDone={handleAnalyzeDone}
+            onError={handleError}
           />
         </AIWorkerErrorBoundary>
       )}

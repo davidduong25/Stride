@@ -250,6 +250,20 @@ function SummaryContent({
     });
   }
 
+  const hasContent =
+    ((walkType === 'vent' || walkType === 'reflect') && !!summary) ||
+    ((walkType === 'brainstorm' || walkType === 'appreciate') && keyPoints.length > 0) ||
+    (walkType === 'plan' && actions.length > 0) ||
+    (walkType === 'untangle' && (keyPoints.length > 0 || !!summary));
+
+  if (!hasContent) {
+    return (
+      <Text style={summaryStyles.emptyText}>
+        Couldn't generate a summary. Tap re-summarise to try again.
+      </Text>
+    );
+  }
+
   if (walkType === 'vent' || walkType === 'reflect') {
     return summary ? (
       <EditableText
@@ -364,6 +378,12 @@ function SummaryContent({
 }
 
 const summaryStyles = StyleSheet.create({
+  emptyText: {
+    fontSize:  15,
+    color:     C.textSecondary,
+    lineHeight: 22,
+    fontStyle: 'italic',
+  },
   prose: {
     fontSize:   15,
     color:      C.text,
@@ -1252,7 +1272,9 @@ export default function WalkSummaryScreen() {
   const allTranscribed =
     sessionRecordings.length > 0 &&
     sessionRecordings.every(
-      r => r.transcript !== null && !queuedIds.has(r.id) && processingId !== r.id
+      r => r.transcript !== null &&
+           !queuedIds.has(r.id) &&
+           !(processingId === r.id && processingType === 'transcribe')
     );
 
   const transcribedCount = sessionRecordings.filter(
@@ -1289,17 +1311,19 @@ export default function WalkSummaryScreen() {
   const confirmedType = session?.walk_type as WalkType | null ?? null;
   const activeType    = localType ?? confirmedType ?? inferredType;
 
-  function handleSummarise() {
-    if (!activeType) return;
+  function handleSummarise(typeOverride?: WalkType) {
+    const type = typeOverride ?? activeType;
+    if (!type) return;
     const transcripts = sessionRecordings
       .map(r => r.transcript)
       .filter((t): t is string => !!t?.trim());
     if (transcripts.length === 0) return;
-    updateSession(sessionId, { walk_type: activeType });
-    enqueueAnalysis(sessionId, transcripts, activeType);
-    if (localType !== null) {
+    updateSession(sessionId, { walk_type: type });
+    enqueueAnalysis(sessionId, transcripts, type);
+    const effectiveLocalType = typeOverride ?? localType;
+    if (effectiveLocalType !== null) {
       for (const r of sessionRecordings) {
-        updateRecording(r.id, { tags: localType });
+        updateRecording(r.id, { tags: effectiveLocalType });
       }
     }
     setIsResummarizing(false);
@@ -1591,9 +1615,9 @@ export default function WalkSummaryScreen() {
           ) : null}
 
           {/* AI title */}
-          {hasAI && (
+          {hasAI && session?.title != null && (
             <EditableText
-              value={session!.title!}
+              value={session.title}
               onSave={handleUpdateTitle}
               style={styles.aiTitle}
             />
@@ -1641,7 +1665,7 @@ export default function WalkSummaryScreen() {
           {allTranscribed && isTaggingThisSession && !hasAI && !isAnalyzing && (
             <View style={styles.processingCard}>
               <View style={styles.processingRow}>
-                <Text style={styles.processingText}>Classifying walk type…</Text>
+                <Text style={styles.processingText}>Determining walk type…</Text>
               </View>
             </View>
           )}
@@ -1686,13 +1710,18 @@ export default function WalkSummaryScreen() {
                 <>
                   <View style={styles.confirmRow}>
                     <IconSymbol name="sparkles" size={13} color={C.tint} />
-                    <Text style={styles.confirmText}>
-                      This sounds like a{' '}
-                      <Text style={styles.confirmTypeLabel}>
-                        {WALK_TYPE_LABELS[activeType]}
+                    {showResummarizeCard || localType !== null ? (
+                      <Text style={styles.confirmText}>
+                        Summarise as{' '}
+                        <Text style={styles.confirmTypeLabel}>{WALK_TYPE_LABELS[activeType]}</Text>?
                       </Text>
-                      {' '}walk. Summarise as that?
-                    </Text>
+                    ) : (
+                      <Text style={styles.confirmText}>
+                        This sounds like a{' '}
+                        <Text style={styles.confirmTypeLabel}>{WALK_TYPE_LABELS[activeType]}</Text>
+                        {' '}walk. Summarise as that?
+                      </Text>
+                    )}
                     <Pressable
                       onPress={() => setShowTypePicker(p => !p)}
                       hitSlop={8}
@@ -1709,6 +1738,7 @@ export default function WalkSummaryScreen() {
                       onSelect={type => {
                         setLocalType(type);
                         setShowTypePicker(false);
+                        if (showResummarizeCard) handleSummarise(type);
                       }}
                     />
                   )}
@@ -1716,7 +1746,9 @@ export default function WalkSummaryScreen() {
                   <Pressable style={styles.summarizeBtn} onPress={handleSummarise}>
                     <IconSymbol name="sparkles" size={14} color={C.text} />
                     <Text style={styles.summarizeBtnText}>
-                      {showResummarizeCard ? 'Summarise differently' : `Yes, summarise as ${WALK_TYPE_LABELS[activeType]}`}
+                      {showResummarizeCard
+                        ? `Re-summarise as ${WALK_TYPE_LABELS[activeType]}`
+                        : `Yes, summarise as ${WALK_TYPE_LABELS[activeType]}`}
                     </Text>
                   </Pressable>
 
@@ -1757,7 +1789,7 @@ export default function WalkSummaryScreen() {
               <View style={styles.sectionHeaderRow}>
                 <Text style={styles.sectionHeader}>THOUGHTS</Text>
                 <View style={styles.sectionHeaderActions}>
-                  {hasAI && !showSummaryOverlay && (
+                  {hasAI && walkType && !showSummaryOverlay && (
                     <Pressable
                       onPress={() => setShowSummaryOverlay(true)}
                       style={styles.summaryToggleBtn}
