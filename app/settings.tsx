@@ -29,7 +29,7 @@ import { buildMarkdownExport } from '@/lib/export';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 
 const version = Constants.expoConfig?.version ?? '1.0.0';
-const PRIVACY_POLICY_URL = 'https://davidduong25.github.io/momentum/privacy';
+const PRIVACY_POLICY_URL = 'https://davidduong25.github.io/Stride/privacy.html';
 
 const BACKUP_TS_KEY = 'stride.lastBackupTs';
 const DB_PATH       = `${documentDirectory ?? ''}SQLite/momentum.db`;
