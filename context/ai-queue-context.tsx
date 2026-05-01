@@ -27,9 +27,8 @@ import { useSessionsContext } from './sessions-context';
 // ---------------------------------------------------------------------------
 
 export type TranscribeJob = { type: 'transcribe'; recordingId: string; uri: string };
-export type TagJob        = { type: 'tag'; recordingId: string; transcript: string };
 export type AnalyzeJob    = { type: 'analyze'; recordingId: string; sessionId: string; transcripts: string[]; walkType: WalkType };
-export type AIJob         = TranscribeJob | TagJob | AnalyzeJob;
+export type AIJob         = TranscribeJob | AnalyzeJob;
 
 type QueueState = { active: AIJob | null; pending: AIJob[] };
 type QueueAction =
@@ -74,18 +73,65 @@ export const WALK_TYPE_DESCRIPTIONS: Record<WalkType, string> = {
   untangle:   'Work through a hard decision',
 };
 
-const TAG_SYSTEM_PROMPT =
-  'You are a walk journal classifier. Given a voice transcript, output exactly one word ' +
-  'that best describes the walk type. Choose only from: vent, brainstorm, plan, reflect, appreciate, untangle. ' +
-  'Output the single word only, nothing else.';
+const WALK_TYPE_KEYWORDS: Record<WalkType, string[]> = {
+  vent: [
+    'frustrated', 'frustrating', 'angry', 'anger', 'annoyed', 'annoying',
+    'stressed', 'stress', 'overwhelmed', 'upset', 'hate', 'ridiculous',
+    'unfair', 'exhausted', 'pissed', 'irritated', 'irritating', 'ugh',
+    'venting', 'rant', 'ranting', 'complain', 'complaining', 'awful',
+    'terrible', 'sick of', 'tired of', 'fed up', "can't stand",
+  ],
+  brainstorm: [
+    'idea', 'ideas', 'what if', 'brainstorm', 'explore', 'possibilities',
+    'imagine', 'concept', 'hypothetically', 'wonder', 'wondering',
+    'thought about', 'thinking of', 'could be', 'might work', 'creative',
+  ],
+  plan: [
+    'need to', 'have to', 'going to', 'schedule', 'deadline',
+    'task', 'next step', 'plan', 'planning', 'todo',
+    'tomorrow', 'this week', 'goal', 'goals', 'reminder', 'appointment',
+    'project', 'milestone', 'priority', 'action item',
+  ],
+  reflect: [
+    'realized', 'realize', 'learned', 'learning', 'feeling', 'felt',
+    'understand', 'understanding', 'processed', 'processing',
+    'experience', 'growth', 'lesson', 'insight', 'perspective',
+    'reflection', 'reflecting', 'looking back', 'makes me think',
+  ],
+  appreciate: [
+    'grateful', 'gratitude', 'thankful', 'appreciate', 'appreciation',
+    'love', 'beautiful', 'amazing', 'blessed', 'blessing', 'happy',
+    'joy', 'joyful', 'wonderful', 'lucky', 'glad', 'fortunate',
+    'awesome', 'fantastic', 'incredible',
+  ],
+  untangle: [
+    'decision', 'decide', 'deciding', 'choice', 'choices', 'either',
+    'confused', 'confusion', 'not sure', 'unsure', 'weighing',
+    'pros and cons', 'dilemma', 'should i', 'on the other hand',
+    'conflicted', 'torn', 'hard to decide', 'both sides',
+  ],
+};
 
-function parseWalkType(response: string): WalkType | null {
-  const words = response.toLowerCase().trim().split(/\s+/);
-  for (const word of words) {
-    const clean = word.replace(/[^a-z]/g, '');
-    if ((VALID_WALK_TYPES as readonly string[]).includes(clean)) return clean as WalkType;
+function classifyTranscript(transcript: string): WalkType | null {
+  const text = transcript.toLowerCase();
+  const scores: Record<WalkType, number> = {
+    vent: 0, brainstorm: 0, plan: 0, reflect: 0, appreciate: 0, untangle: 0,
+  };
+  for (const type of VALID_WALK_TYPES) {
+    for (const keyword of WALK_TYPE_KEYWORDS[type]) {
+      let pos = 0;
+      while ((pos = text.indexOf(keyword, pos)) !== -1) {
+        scores[type]++;
+        pos += keyword.length;
+      }
+    }
   }
-  return null;
+  let best: WalkType | null = null;
+  let bestScore = 0;
+  for (const type of VALID_WALK_TYPES) {
+    if (scores[type] > bestScore) { bestScore = scores[type]; best = type; }
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,20 +271,15 @@ async function resampleTo16k(pcm: number[], fromRate: number): Promise<number[]>
 }
 
 async function decodeAudioToPCM(uri: string): Promise<number[]> {
-  let raw: Uint8Array | null = null;
-  for (let i = 0; i < 10; i++) {
-    const res = await fetch(uri);
-    const ab = await res.arrayBuffer();
-    if (ab.byteLength > 4096) { raw = new Uint8Array(ab); break; }
-    await new Promise(resolve => setTimeout(resolve, 200));
+  const res = await fetch(uri);
+  const ab = await res.arrayBuffer();
+  if (ab.byteLength <= 4096) {
+    throw new Error(`Audio file too small: ${ab.byteLength} bytes at ${uri}`);
   }
-  if (!raw || raw.byteLength <= 4096) {
-    throw new Error(`Audio file not ready after retries: ${raw?.byteLength ?? 0} bytes at ${uri}`);
-  }
+  const raw = new Uint8Array(ab);
   const buffer = raw.buffer;
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
-  raw = null;
 
   if (bytes.length < 8) throw new Error(`File too small: ${bytes.length} bytes`);
   const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
@@ -438,68 +479,6 @@ function TranscriptionWorker({
   return null;
 }
 
-function TagWorker({
-  recordingId,
-  transcript,
-  onDone,
-  onError,
-}: {
-  recordingId: string;
-  transcript: string;
-  onDone: (recordingId: string, response: string) => void;
-  onError: (err: string) => void;
-}) {
-  const { generate, isReady, isGenerating, response, error } = useLLM({
-    modelSource: LLAMA3_2_1B_QLORA,
-    tokenizerSource: LLAMA3_2_1B_TOKENIZER,
-    tokenizerConfigSource: LLAMA3_2_TOKENIZER_CONFIG,
-  });
-  const startedRef       = useRef(false);
-  const wasGeneratingRef = useRef(false);
-  const pendingIdRef     = useRef<string | null>(null);
-  const calledDoneRef    = useRef(false);
-  const responseRef      = useRef('');
-  responseRef.current    = response ?? '';
-
-  function callDoneOnce(id: string, res: string) {
-    if (calledDoneRef.current) return;
-    calledDoneRef.current = true;
-    onDone(id, res);
-  }
-
-  useEffect(() => {
-    if (!isReady || startedRef.current) return;
-    startedRef.current = true;
-    pendingIdRef.current = recordingId;
-    try {
-      generate([
-        { role: 'system', content: TAG_SYSTEM_PROMPT },
-        { role: 'user',   content: transcript },
-      ]);
-    } catch (e) {
-      pendingIdRef.current = null;
-      startedRef.current = false;
-      onError(e instanceof Error ? e.message : String(e));
-    }
-  }, [isReady, generate, transcript, recordingId, onError]);
-
-  useEffect(() => {
-    if (isGenerating) { wasGeneratingRef.current = true; return; }
-    if (wasGeneratingRef.current && pendingIdRef.current) {
-      const id = pendingIdRef.current;
-      pendingIdRef.current = null;
-      wasGeneratingRef.current = false;
-      callDoneOnce(id, responseRef.current);
-    }
-  }, [isGenerating, onDone]);
-
-  useEffect(() => {
-    if (!error) return;
-    callDoneOnce(recordingId, '');
-  }, [error, recordingId]);
-
-  return null;
-}
 
 function AnalyzeWorker({
   job,
@@ -530,6 +509,11 @@ function AnalyzeWorker({
 
   useEffect(() => {
     if (!isReady || startedRef.current) return;
+    const systemPrompt = ANALYZE_PROMPTS[job.walkType];
+    if (!systemPrompt) {
+      onError(`Unknown walk type: ${job.walkType}`);
+      return;
+    }
     startedRef.current = true;
     pendingIdRef.current = job.sessionId;
     const userMessage = job.transcripts
@@ -537,7 +521,7 @@ function AnalyzeWorker({
       .join('\n');
     try {
       generate([
-        { role: 'system', content: ANALYZE_PROMPTS[job.walkType] },
+        { role: 'system', content: systemPrompt },
         { role: 'user',   content: `Analyze these voice notes:\n\n${userMessage}` },
       ]);
     } catch (e) {
@@ -574,7 +558,7 @@ type AIQueueCtx = {
   enqueueAnalysis: (sessionId: string, transcripts: string[], walkType: WalkType) => void;
   cancelAnalysis: (sessionId: string) => void;
   processingId: string | null;
-  processingType: 'transcribe' | 'tag' | 'analyze' | null;
+  processingType: 'transcribe' | 'analyze' | null;
   modelDownloadProgress: number;
   isModelReady: boolean;
   modelError: string | null;
@@ -593,6 +577,14 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   const [isModelReady, setIsModelReady]                   = useState(false);
   const [modelError, setModelError]                       = useState<string | null>(null);
   const [failedIds, setFailedIds]                         = useState<Set<string>>(new Set());
+  const [transcriptionKey, setTranscriptionKey]           = useState(0);
+
+  const [analyzeWorkerReady, setAnalyzeWorkerReady] = useState(false);
+  useEffect(() => {
+    if (queue.active?.type !== 'analyze') { setAnalyzeWorkerReady(false); return; }
+    const t = setTimeout(() => setAnalyzeWorkerReady(true), 1500);
+    return () => clearTimeout(t);
+  }, [queue.active?.type]);
 
   const dispatchRef          = useRef(dispatch);
   dispatchRef.current        = dispatch;
@@ -612,6 +604,7 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
         setFailedIds(prev => new Set([...prev, active.recordingId]));
         if (active.type === 'transcribe') {
           updateRecording(active.recordingId, { transcript: '' });
+          setTranscriptionKey(k => k + 1);
         }
         dispatchRef.current({ type: 'NEXT' });
       }
@@ -627,30 +620,17 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   const handleTranscriptionDone = useCallback(
     async (recordingId: string, transcript: string) => {
       try {
-        await updateRecording(recordingId, { transcript: transcript || '', transcript_edited: 0 });
+        const walkType = transcript.trim() ? classifyTranscript(transcript) : null;
+        await updateRecording(recordingId, {
+          transcript: transcript || '',
+          transcript_edited: 0,
+          ...(walkType ? { tags: walkType } : {}),
+        });
         if (!mountedRef.current) return;
         setFailedIds(prev => { const n = new Set(prev); n.delete(recordingId); return n; });
-        if (transcript.trim()) {
-          dispatchRef.current({ type: 'NEXT', insertFront: { type: 'tag', recordingId, transcript } });
-        } else {
-          dispatchRef.current({ type: 'NEXT' });
-        }
       } catch {
         if (!mountedRef.current) return;
         setFailedIds(prev => new Set([...prev, recordingId]));
-        dispatchRef.current({ type: 'NEXT' });
-      }
-    },
-    [updateRecording]
-  );
-
-  const handleTagsDone = useCallback(
-    async (recordingId: string, response: string) => {
-      try {
-        const walkType = parseWalkType(response);
-        if (walkType) {
-          await updateRecording(recordingId, { tags: walkType });
-        }
       } finally {
         if (mountedRef.current) dispatchRef.current({ type: 'NEXT' });
       }
@@ -658,7 +638,7 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
     [updateRecording]
   );
 
-  const handleAnalyzeDone = useCallback(
+const handleAnalyzeDone = useCallback(
     async (sessionId: string, response: string, walkType: WalkType) => {
       if (!mountedRef.current) return;
       if (cancelledAnalysisRef.current.has(sessionId)) {
@@ -684,6 +664,8 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
             });
           } catch { /* native module not available in this build */ }
         }
+      } catch {
+        // DB write failed — Sentry captured inside updateSession; advance queue
       } finally {
         if (mountedRef.current) dispatchRef.current({ type: 'NEXT' });
       }
@@ -692,6 +674,9 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   );
 
   function enqueueTranscription(recordingId: string, uri: string) {
+    const alreadyActive = queue.active?.type === 'transcribe' && queue.active.recordingId === recordingId;
+    const alreadyPending = queue.pending.some(j => j.type === 'transcribe' && j.recordingId === recordingId);
+    if (alreadyActive || alreadyPending) return;
     setFailedIds(prev => { const n = new Set(prev); n.delete(recordingId); return n; });
     dispatch({ type: 'PUSH', job: { type: 'transcribe', recordingId, uri } });
   }
@@ -727,8 +712,8 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   return (
     <AIQueueContext.Provider value={value}>
       {children}
-      {queue.active?.type !== 'tag' && queue.active?.type !== 'analyze' && (
-        <AIWorkerErrorBoundary key={queue.active?.recordingId ?? 'idle'} onError={handleError}>
+      {queue.active?.type !== 'analyze' && (
+        <AIWorkerErrorBoundary key={transcriptionKey} onError={handleError}>
           <TranscriptionWorker
             job={queue.active?.type === 'transcribe' ? queue.active : null}
             onDone={handleTranscriptionDone}
@@ -738,17 +723,7 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
           />
         </AIWorkerErrorBoundary>
       )}
-      {queue.active?.type === 'tag' && (
-        <AIWorkerErrorBoundary key={queue.active.recordingId} onError={handleError}>
-          <TagWorker
-            recordingId={queue.active.recordingId}
-            transcript={queue.active.transcript}
-            onDone={handleTagsDone}
-            onError={handleError}
-          />
-        </AIWorkerErrorBoundary>
-      )}
-      {queue.active?.type === 'analyze' && (
+      {queue.active?.type === 'analyze' && analyzeWorkerReady && (
         <AIWorkerErrorBoundary key={queue.active.sessionId} onError={handleError}>
           <AnalyzeWorker
             job={queue.active}

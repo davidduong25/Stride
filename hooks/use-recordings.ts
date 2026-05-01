@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as SQLite from 'expo-sqlite';
+import * as Sentry from '@sentry/react-native';
 import { File } from 'expo-file-system';
 import {
   documentDirectory,
@@ -103,17 +104,22 @@ export function useRecordings() {
       id: Date.now().toString() + Math.random().toString(36).slice(2),
       date: new Date().toISOString(),
     };
-    await dbRef.current.runAsync(
-      `INSERT INTO recordings
-        (id, filename, uri, duration, date, transcript, tags, steps, transcript_edited)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        newEntry.id, newEntry.filename, newEntry.uri,
-        newEntry.duration, newEntry.date,
-        newEntry.transcript ?? null, newEntry.tags ?? null,
-        newEntry.steps ?? null, newEntry.transcript_edited ?? null,
-      ]
-    );
+    try {
+      await dbRef.current.runAsync(
+        `INSERT INTO recordings
+          (id, filename, uri, duration, date, transcript, tags, steps, transcript_edited)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          newEntry.id, newEntry.filename, newEntry.uri,
+          newEntry.duration, newEntry.date,
+          newEntry.transcript ?? null, newEntry.tags ?? null,
+          newEntry.steps ?? null, newEntry.transcript_edited ?? null,
+        ]
+      );
+    } catch (e) {
+      Sentry.captureException(e, { extra: { fn: 'addRecording' } });
+      throw e;
+    }
     if (newEntry.waveform) {
       await writeAsStringAsync(waveformPath(newEntry.id), newEntry.waveform).catch(() => {});
     }
@@ -127,17 +133,27 @@ export function useRecordings() {
     if (fields.length === 0) return;
     const setClauses = fields.map(f => `${f} = ?`).join(', ');
     const values = fields.map(f => (patch[f] !== undefined ? patch[f] : null));
-    await dbRef.current.runAsync(
-      `UPDATE recordings SET ${setClauses} WHERE id = ?`,
-      [...values, id]
-    );
+    try {
+      await dbRef.current.runAsync(
+        `UPDATE recordings SET ${setClauses} WHERE id = ?`,
+        [...values, id]
+      );
+    } catch (e) {
+      Sentry.captureException(e, { extra: { fn: 'updateRecording', id } });
+      throw e;
+    }
     setRecordings(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r));
   }
 
   async function deleteRecording(id: string) {
     if (!dbRef.current) return;
     const entry = recordings.find(r => r.id === id);
-    await dbRef.current.runAsync('DELETE FROM recordings WHERE id = ?', [id]);
+    try {
+      await dbRef.current.runAsync('DELETE FROM recordings WHERE id = ?', [id]);
+    } catch (e) {
+      Sentry.captureException(e, { extra: { fn: 'deleteRecording', id } });
+      throw e;
+    }
     setRecordings(prev => prev.filter(r => r.id !== id));
     if (entry) {
       try { new File(entry.uri).delete(); } catch { /* file already gone */ }
@@ -151,7 +167,12 @@ export function useRecordings() {
       try { new File(r.uri).delete(); } catch { /* file already gone */ }
       await deleteAsync(waveformPath(r.id), { idempotent: true }).catch(() => {});
     }
-    await dbRef.current.runAsync('DELETE FROM recordings');
+    try {
+      await dbRef.current.runAsync('DELETE FROM recordings');
+    } catch (e) {
+      Sentry.captureException(e, { extra: { fn: 'clearAllRecordings' } });
+      throw e;
+    }
     setRecordings([]);
   }
 

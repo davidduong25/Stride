@@ -345,17 +345,21 @@ export default function LogsScreen() {
   }
 
   function openSession(session: SessionEntry) {
-    const sessionRecordings = recordings.filter(r => {
-      const t = new Date(r.date).getTime();
-      return t >= session.started_at && t <= session.ended_at + 60_000;
-    });
+    const recordingIds = session.recording_ids
+      ? session.recording_ids.split(',').filter(Boolean)
+      : recordings
+          .filter(r => {
+            const t = new Date(r.date).getTime();
+            return t >= session.started_at && t <= session.ended_at + 60_000;
+          })
+          .map(r => r.id);
     router.push({
       pathname: '/walk-summary',
       params: {
         startedAt:    session.started_at.toString(),
         endedAt:      session.ended_at.toString(),
         steps:        session.steps.toString(),
-        recordingIds: sessionRecordings.map(r => r.id).join(','),
+        recordingIds: recordingIds.join(','),
       },
     });
   }

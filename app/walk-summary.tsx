@@ -1286,10 +1286,6 @@ export default function WalkSummaryScreen() {
     return sum + words.length;
   }, 0);
 
-  const isTaggingThisSession =
-    processingType === 'tag' &&
-    sessionRecordings.some(r => r.id === processingId);
-
   // Derive inferred walk type from recording tags (persisted to SQLite)
   const inferredType = dominantWalkType(sessionRecordings.map(r => r.tags));
 
@@ -1302,10 +1298,20 @@ export default function WalkSummaryScreen() {
   const [cancelling, setCancelling]              = useState(false);
   const [showReminders, setShowReminders]        = useState(false);
   const [showShareSheet, setShowShareSheet]      = useState(false);
+  const [classifying, setClassifying]            = useState(false);
+  const classifiedRef                            = useRef(false);
 
   useEffect(() => {
     if (!isAnalyzing) setCancelling(false);
   }, [isAnalyzing]);
+
+  useEffect(() => {
+    if (!allTranscribed || hasAI || totalWordCount < 5 || classifiedRef.current) return;
+    classifiedRef.current = true;
+    setClassifying(true);
+    const t = setTimeout(() => setClassifying(false), 1200);
+    return () => clearTimeout(t);
+  }, [allTranscribed, hasAI, totalWordCount]);
 
   // Active type for confirmation card: local override → previously confirmed → inferred
   const confirmedType = session?.walk_type as WalkType | null ?? null;
@@ -1498,7 +1504,15 @@ export default function WalkSummaryScreen() {
           style: 'destructive',
           onPress: async () => {
             if (playingId === id) await stopCurrentPlayback();
+            const loaded = soundMapRef.current.get(id);
+            if (loaded) {
+              loaded.sub?.remove();
+              loaded.player.remove();
+              soundMapRef.current.delete(id);
+            }
             await deleteRecording(id);
+            const remainingIds = sessionRecordings.filter(r => r.id !== id).map(r => r.id);
+            updateSession(sessionId, { recording_ids: remainingIds.join(',') || null });
           },
         },
       ]
@@ -1581,7 +1595,7 @@ export default function WalkSummaryScreen() {
 
   const showConfirmCard =
     allTranscribed &&
-    !isTaggingThisSession &&
+    !classifying &&
     !isAnalyzing &&
     !hasAI &&
     totalWordCount >= 5 &&
@@ -1643,6 +1657,15 @@ export default function WalkSummaryScreen() {
 
           {/* ── Processing states ──────────────────────────────────────────── */}
 
+          {classifying && (
+            <View style={styles.processingCard}>
+              <View style={styles.processingRow}>
+                <IconSymbol name="sparkles" size={13} color={C.tint} />
+                <Text style={styles.processingText}>Deriving walk type…</Text>
+              </View>
+            </View>
+          )}
+
           {!isAnalyzing && !hasAI && !allTranscribed && sessionRecordings.length > 0 && (
             <View style={styles.processingCard}>
               <View style={styles.processingRow}>
@@ -1658,14 +1681,6 @@ export default function WalkSummaryScreen() {
                     { width: `${Math.round((transcribedCount / sessionRecordings.length) * 100)}%` },
                   ]}
                 />
-              </View>
-            </View>
-          )}
-
-          {allTranscribed && isTaggingThisSession && !hasAI && !isAnalyzing && (
-            <View style={styles.processingCard}>
-              <View style={styles.processingRow}>
-                <Text style={styles.processingText}>Determining walk type…</Text>
               </View>
             </View>
           )}

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as SQLite from 'expo-sqlite';
+import * as Sentry from '@sentry/react-native';
 
 const DB_NAME = 'momentum.db';
 
@@ -13,6 +14,7 @@ export type SessionEntry = {
   actions: string | null;    // JSON string of string[]
   walk_type: string | null;  // confirmed WalkType, set when user triggers analysis
   summary: string | null;    // prose summary for vent/reflect/appreciate/untangle types
+  recording_ids: string | null; // comma-separated recording IDs captured at session end
 };
 
 type SessionPatch = Partial<Pick<SessionEntry, 'title' | 'key_points' | 'actions' | 'walk_type' | 'summary'>>;
@@ -39,6 +41,7 @@ export function useSessions() {
       const sessionMigrations = [
         'ALTER TABLE sessions ADD COLUMN walk_type TEXT',
         'ALTER TABLE sessions ADD COLUMN summary TEXT',
+        'ALTER TABLE sessions ADD COLUMN recording_ids TEXT',
       ];
       for (const sql of sessionMigrations) {
         try { await db.execAsync(sql); } catch { /* column already exists */ }
@@ -57,16 +60,21 @@ export function useSessions() {
   }, []);
 
   async function addSession(
-    entry: Pick<SessionEntry, 'id' | 'started_at' | 'ended_at' | 'steps'>
+    entry: Pick<SessionEntry, 'id' | 'started_at' | 'ended_at' | 'steps' | 'recording_ids'>
   ): Promise<void> {
     if (!dbRef.current) return;
     const newEntry: SessionEntry = { ...entry, title: null, key_points: null, actions: null, walk_type: null, summary: null };
-    await dbRef.current.runAsync(
-      `INSERT OR REPLACE INTO sessions
-        (id, started_at, ended_at, steps, title, key_points, actions, walk_type, summary)
-        VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)`,
-      [newEntry.id, newEntry.started_at, newEntry.ended_at, newEntry.steps]
-    );
+    try {
+      await dbRef.current.runAsync(
+        `INSERT OR REPLACE INTO sessions
+          (id, started_at, ended_at, steps, title, key_points, actions, walk_type, summary, recording_ids)
+          VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?)`,
+        [newEntry.id, newEntry.started_at, newEntry.ended_at, newEntry.steps, newEntry.recording_ids ?? null]
+      );
+    } catch (e) {
+      Sentry.captureException(e, { extra: { fn: 'addSession' } });
+      throw e;
+    }
     setSessions(prev => [newEntry, ...prev.filter(s => s.id !== newEntry.id)]);
   }
 
@@ -76,22 +84,37 @@ export function useSessions() {
     if (fields.length === 0) return;
     const setClauses = fields.map(f => `${f} = ?`).join(', ');
     const values = fields.map(f => patch[f] ?? null);
-    await dbRef.current.runAsync(
-      `UPDATE sessions SET ${setClauses} WHERE id = ?`,
-      [...values, id]
-    );
+    try {
+      await dbRef.current.runAsync(
+        `UPDATE sessions SET ${setClauses} WHERE id = ?`,
+        [...values, id]
+      );
+    } catch (e) {
+      Sentry.captureException(e, { extra: { fn: 'updateSession', id } });
+      throw e;
+    }
     setSessions(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
   }
 
   async function deleteSession(id: string): Promise<void> {
     if (!dbRef.current) return;
-    await dbRef.current.runAsync('DELETE FROM sessions WHERE id = ?', [id]);
+    try {
+      await dbRef.current.runAsync('DELETE FROM sessions WHERE id = ?', [id]);
+    } catch (e) {
+      Sentry.captureException(e, { extra: { fn: 'deleteSession', id } });
+      throw e;
+    }
     setSessions(prev => prev.filter(s => s.id !== id));
   }
 
   async function clearAllSessions(): Promise<void> {
     if (!dbRef.current) return;
-    await dbRef.current.runAsync('DELETE FROM sessions');
+    try {
+      await dbRef.current.runAsync('DELETE FROM sessions');
+    } catch (e) {
+      Sentry.captureException(e, { extra: { fn: 'clearAllSessions' } });
+      throw e;
+    }
     setSessions([]);
   }
 

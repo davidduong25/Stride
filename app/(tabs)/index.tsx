@@ -12,6 +12,8 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 
+import * as Sentry from '@sentry/react-native';
+
 import { C } from '@/constants/theme';
 import { useAudioRecording } from '@/hooks/use-audio-recording';
 import { usePedometer, type PedometerState } from '@/hooks/use-pedometer';
@@ -101,7 +103,7 @@ function LiveWaveform({ samples, color }: { samples: number[]; color: string }) 
 
 export default function HomeScreen() {
   const router   = useRouter();
-  const { pedometerState, stepCount, stepCountRef, distanceMiles, graceSecondsLeft,
+  const { pedometerState, stepCount, stepCountRef, graceSecondsLeft,
           pauseIntentionally, resumeFromPause } = usePedometer();
   const { isRecording, liveWaveform, recordingSeconds,
           startRecording, stopRecording }      = useAudioRecording();
@@ -166,12 +168,14 @@ export default function HomeScreen() {
 
   function openLastWalk() {
     if (!lastSession) return;
-    const sessionRecordingIds = recordings
-      .filter(r => {
-        const t = new Date(r.date).getTime();
-        return t >= lastSession.started_at && t <= lastSession.ended_at + 60_000;
-      })
-      .map(r => r.id);
+    const sessionRecordingIds = lastSession.recording_ids
+      ? lastSession.recording_ids.split(',').filter(Boolean)
+      : recordings
+          .filter(r => {
+            const t = new Date(r.date).getTime();
+            return t >= lastSession.started_at && t <= lastSession.ended_at + 60_000;
+          })
+          .map(r => r.id);
     router.push({
       pathname: '/walk-summary',
       params: {
@@ -234,17 +238,19 @@ export default function HomeScreen() {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       if (isRecording) handleStopRecording();
       await pendingSaveRef.current;
-      if (!isSessionActiveRef.current) return;
       const snapshot = await endSession(stepCountRef.current);
-      if (!snapshot) return;
+      if (!snapshot || snapshot.recordingIds.length === 0) return;
       await addSession({
-        id: snapshot.startedAt.toString(),
-        started_at: snapshot.startedAt,
-        ended_at:   snapshot.endedAt,
-        steps:      snapshot.stepCount,
+        id:            snapshot.startedAt.toString(),
+        started_at:    snapshot.startedAt,
+        ended_at:      snapshot.endedAt,
+        steps:         snapshot.stepCount,
+        recording_ids: snapshot.recordingIds.join(',') || null,
       });
       navigateToSummary(snapshot);
-    } catch { /* prevent unhandled rejection crash on New Architecture */ }
+    } catch (e) {
+      Sentry.captureException(e, { extra: { fn: 'handleEndSession' } });
+    }
   }, [isRecording, handleStopRecording, endSession, stepCountRef, addSession, navigateToSummary]);
 
   // ── Pedometer-driven effects ─────────────────────────────────────────────
@@ -262,7 +268,7 @@ export default function HomeScreen() {
       return;
     }
     if (pedometerState === 'locked' && prev !== 'checking' && prev !== 'unavailable' &&
-        isSessionActiveRef.current) {
+        isSessionActiveRef.current && !testMode) {
       let cancelled = false;
       (async () => {
         try {
@@ -272,17 +278,18 @@ export default function HomeScreen() {
           if (!snapshot) return;
           if (snapshot.recordingIds.length === 0) return;
           await addSession({
-            id: snapshot.startedAt.toString(),
-            started_at: snapshot.startedAt,
-            ended_at:   snapshot.endedAt,
-            steps:      snapshot.stepCount,
+            id:            snapshot.startedAt.toString(),
+            started_at:    snapshot.startedAt,
+            ended_at:      snapshot.endedAt,
+            steps:         snapshot.stepCount,
+            recording_ids: snapshot.recordingIds.join(','),
           });
           navigateToSummary(snapshot);
         } catch { /* prevent unhandled rejection crash on New Architecture */ }
       })();
       return () => { cancelled = true; };
     }
-  }, [pedometerState, startSession, endSession, stepCountRef, addSession, navigateToSummary]);
+  }, [pedometerState, testMode, startSession, endSession, stepCountRef, addSession, navigateToSummary]);
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', next => {
@@ -305,7 +312,6 @@ export default function HomeScreen() {
 
   const aiStatus = isSessionActive ? null
     : processingType === 'transcribe' ? 'Transcribing…'
-    : processingType === 'tag'        ? 'Tagging…'
     : processingType === 'analyze'    ? 'Analyzing…'
     : null;
 
