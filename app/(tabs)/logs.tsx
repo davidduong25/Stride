@@ -75,7 +75,7 @@ function sessionWalkType(
   return tags.reduce((a, b) => counts[a] >= counts[b] ? a : b) as WalkType;
 }
 
-type SortOption = 'recent' | 'longest' | 'type';
+type SortOption = 'recent' | 'longest';
 
 // ---------------------------------------------------------------------------
 // SessionCard
@@ -292,21 +292,9 @@ export default function LogsScreen() {
     ? searched.filter(s => sessionWalkType(s, recordings) === filterType)
     : searched;
 
-  const sorted = (() => {
-    if (sortBy === 'longest') {
-      return [...filtered].sort(
-        (a, b) => (b.ended_at - b.started_at) - (a.ended_at - a.started_at)
-      );
-    }
-    if (sortBy === 'type') {
-      return [...filtered].sort((a, b) => {
-        const ta = sessionWalkType(a, recordings) ?? 'zzz';
-        const tb = sessionWalkType(b, recordings) ?? 'zzz';
-        return ta.localeCompare(tb);
-      });
-    }
-    return filtered; // 'recent' — already sorted by started_at DESC from SQLite
-  })();
+  const sorted = sortBy === 'longest'
+    ? [...filtered].sort((a, b) => (b.ended_at - b.started_at) - (a.ended_at - a.started_at))
+    : filtered; // 'recent' — already sorted by started_at DESC from SQLite
 
   function handleShare(session: SessionEntry) {
     const recs       = sessionRecs(session);
@@ -390,33 +378,29 @@ export default function LogsScreen() {
         <EllipsisMenu />
       </View>
 
-      {/* Search */}
-      <View style={styles.searchRow}>
-        <IconSymbol name="magnifyingglass" size={14} color={C.textTertiary} />
-        <TextInput
-          style={styles.searchInput}
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          placeholder="search thoughts…"
-          placeholderTextColor={C.textTertiary}
-          returnKeyType="search"
-          clearButtonMode="while-editing"
-        />
-      </View>
-
-      {/* Sort controls */}
-      <View style={styles.sortRow}>
-        {(['recent', 'longest', 'type'] as SortOption[]).map(option => (
-          <Pressable
-            key={option}
-            onPress={() => setSortBy(option)}
-            style={[styles.sortPill, sortBy === option && styles.sortPillActive]}
-          >
-            <Text style={[styles.sortPillText, sortBy === option && styles.sortPillTextActive]}>
-              {option}
-            </Text>
-          </Pressable>
-        ))}
+      {/* Search + Sort */}
+      <View style={styles.searchSortRow}>
+        <View style={styles.searchBar}>
+          <IconSymbol name="magnifyingglass" size={14} color={C.textTertiary} />
+          <TextInput
+            style={styles.searchInput}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="search thoughts…"
+            placeholderTextColor={C.textTertiary}
+            returnKeyType="search"
+            clearButtonMode="while-editing"
+          />
+        </View>
+        <Pressable
+          style={styles.sortButton}
+          onPress={() => setSortBy(prev => prev === 'recent' ? 'longest' : 'recent')}
+        >
+          <IconSymbol name="arrow.up.arrow.down" size={11} color={C.textSecondary} />
+          <Text style={styles.sortButtonText}>
+            {sortBy === 'recent' ? 'Recent' : 'Longest'}
+          </Text>
+        </Pressable>
       </View>
 
       {/* Walk type filter */}
@@ -516,11 +500,17 @@ const styles = StyleSheet.create({
     color:         C.text,
     letterSpacing: -0.5,
   },
-  searchRow: {
+  searchSortRow: {
+    flexDirection:    'row',
+    alignItems:       'center',
+    marginHorizontal: 24,
+    marginBottom:     10,
+    gap:               8,
+  },
+  searchBar: {
+    flex:              1,
     flexDirection:     'row',
     alignItems:        'center',
-    marginHorizontal:  24,
-    marginBottom:      10,
     backgroundColor:   C.surface,
     borderRadius:      12,
     paddingHorizontal: 12,
@@ -532,32 +522,19 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color:    C.text,
   },
-
-  sortRow: {
+  sortButton: {
     flexDirection:     'row',
-    gap:                6,
-    paddingHorizontal: 24,
-    marginBottom:       10,
-  },
-  sortPill: {
-    paddingHorizontal: 12,
-    paddingVertical:    5,
-    borderRadius:      20,
+    alignItems:        'center',
+    gap:                5,
     backgroundColor:   C.surface,
-    borderWidth:       1,
-    borderColor:       C.border,
+    borderRadius:      12,
+    paddingHorizontal: 12,
+    paddingVertical:    9,
   },
-  sortPillActive: {
-    backgroundColor: C.tint,
-    borderColor:     C.tint,
-  },
-  sortPillText: {
-    fontSize:   12,
+  sortButtonText: {
+    fontSize:   13,
     color:      C.textSecondary,
     fontWeight: '500',
-  },
-  sortPillTextActive: {
-    color: C.text,
   },
 
   filterScrollRow: {

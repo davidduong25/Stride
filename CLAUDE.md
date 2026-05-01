@@ -1,9 +1,9 @@
-# Momentum — Project Rules
+# Stride — Project Rules
 
 ## Project
 
 React Native / Expo Router app (SDK 54, New Architecture enabled, React Compiler enabled).
-Project root: `C:\Users\david\momentum`. All source files live here — ignore the nested `momentum/` subfolder.
+Project root: `C:\Users\david\stride`. All source files live here — ignore the nested `momentum/` subfolder.
 
 ## Hard Rules
 -->

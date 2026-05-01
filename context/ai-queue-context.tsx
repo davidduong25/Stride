@@ -65,6 +65,15 @@ export const WALK_TYPE_LABELS: Record<WalkType, string> = {
   untangle:   'Untangle',
 };
 
+export const WALK_TYPE_DESCRIPTIONS: Record<WalkType, string> = {
+  vent:       'Get it off your chest',
+  brainstorm: 'Think out loud, capture every idea',
+  plan:       'Turn thoughts into action items',
+  reflect:    'Process an experience or feeling',
+  appreciate: 'Notice what\'s good around you',
+  untangle:   'Work through a hard decision',
+};
+
 const TAG_SYSTEM_PROMPT =
   'You are a walk journal classifier. Given a voice transcript, output exactly one word ' +
   'that best describes the walk type. Choose only from: vent, brainstorm, plan, reflect, appreciate, untangle. ' +
@@ -147,45 +156,69 @@ function parseAnalysisResponse(response: string): AnalysisResult {
   }
 }
 
-function cappedMapAdd<T>(prev: Record<string, T>, key: string, value: T, limit: number): Record<string, T> {
-  const next = { ...prev, [key]: value };
-  const keys = Object.keys(next);
-  if (keys.length <= limit) return next;
-  const oldest = keys.sort()[0];
-  const { [oldest]: _evicted, ...rest } = next;
-  return rest;
-}
-
 // ---------------------------------------------------------------------------
 // Audio decoder — reads a saved audio file and returns a PCM float32 array
 // ---------------------------------------------------------------------------
 
-function extractInt16PCM(view: DataView, start: number, end: number): number[] {
+// Yield to the JS event loop so the UI stays responsive during heavy decoding.
+// Checks every DECODE_CHECK_INTERVAL samples; yields only if 8+ ms have elapsed.
+const DECODE_CHECK_INTERVAL = 4096;
+function yieldToUI(): Promise<void> { return new Promise(resolve => setImmediate(resolve)); }
+
+async function extractInt16PCM(view: DataView, start: number, end: number): Promise<number[]> {
   const pcm: number[] = [];
+  let lastYield = Date.now();
   for (let i = start; i + 1 < end; i += 2) {
     pcm.push(view.getInt16(i, true) / 32768);
+    if (pcm.length % DECODE_CHECK_INTERVAL === 0) {
+      const now = Date.now();
+      if (now - lastYield >= 8) { lastYield = now; await yieldToUI(); }
+    }
   }
   return pcm;
 }
 
-function extractFloat32PCM(view: DataView, start: number, end: number): number[] {
+async function extractFloat32PCM(view: DataView, start: number, end: number): Promise<number[]> {
   const pcm: number[] = [];
+  let lastYield = Date.now();
   for (let i = start; i + 3 < end; i += 4) {
     pcm.push(view.getFloat32(i, true));
+    if (pcm.length % DECODE_CHECK_INTERVAL === 0) {
+      const now = Date.now();
+      if (now - lastYield >= 8) { lastYield = now; await yieldToUI(); }
+    }
   }
   return pcm;
 }
 
-function resampleTo16k(pcm: number[], fromRate: number): number[] {
+async function stereoToMono(stereo: number[]): Promise<number[]> {
+  const mono: number[] = [];
+  let lastYield = Date.now();
+  for (let i = 0; i + 1 < stereo.length; i += 2) {
+    mono.push((stereo[i] + stereo[i + 1]) / 2);
+    if (mono.length % DECODE_CHECK_INTERVAL === 0) {
+      const now = Date.now();
+      if (now - lastYield >= 8) { lastYield = now; await yieldToUI(); }
+    }
+  }
+  return mono;
+}
+
+async function resampleTo16k(pcm: number[], fromRate: number): Promise<number[]> {
   if (fromRate === 16000) return pcm;
   const ratio = fromRate / 16000;
   const outLen = Math.floor(pcm.length / ratio);
   const out = new Array<number>(outLen);
+  let lastYield = Date.now();
   for (let i = 0; i < outLen; i++) {
     const pos = i * ratio;
     const lo = Math.floor(pos);
     const hi = Math.min(lo + 1, pcm.length - 1);
     out[i] = pcm[lo] + (pcm[hi] - pcm[lo]) * (pos - lo);
+    if (i % DECODE_CHECK_INTERVAL === 0 && i > 0) {
+      const now = Date.now();
+      if (now - lastYield >= 8) { lastYield = now; await yieldToUI(); }
+    }
   }
   return out;
 }
@@ -233,22 +266,13 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
     let pcm: number[];
 
     if (audioFormat === 3 || bitsPerSample === 32) {
-      const floatSamples = extractFloat32PCM(view, dataOffset, end);
-      if (numChannels === 2) {
-        pcm = [];
-        for (let i = 0; i + 1 < floatSamples.length; i += 2) pcm.push((floatSamples[i] + floatSamples[i + 1]) / 2);
-      } else {
-        pcm = floatSamples;
-      }
+      const floatSamples = await extractFloat32PCM(view, dataOffset, end);
+      pcm = numChannels === 2 ? await stereoToMono(floatSamples) : floatSamples;
     } else {
-      pcm = extractInt16PCM(view, dataOffset, end);
-      if (numChannels === 2) {
-        const mono: number[] = [];
-        for (let i = 0; i + 1 < pcm.length; i += 2) mono.push((pcm[i] + pcm[i + 1]) / 2);
-        pcm = mono;
-      }
+      const raw = await extractInt16PCM(view, dataOffset, end);
+      pcm = numChannels === 2 ? await stereoToMono(raw) : raw;
     }
-    return resampleTo16k(pcm, sampleRate);
+    return await resampleTo16k(pcm, sampleRate);
   }
 
   if (magic === 'caff') {
@@ -280,23 +304,14 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
         const dataEnd = streaming ? bytes.length : Math.min(offset + 12 + size, bytes.length);
         let pcm: number[];
         if (cafIsFloat || cafBitsPerChannel === 32) {
-          const floatSamples = extractFloat32PCM(view, dataStart, dataEnd);
-          if (cafChannels === 2) {
-            pcm = [];
-            for (let i = 0; i + 1 < floatSamples.length; i += 2) pcm.push((floatSamples[i] + floatSamples[i + 1]) / 2);
-          } else {
-            pcm = floatSamples;
-          }
+          const floatSamples = await extractFloat32PCM(view, dataStart, dataEnd);
+          pcm = cafChannels === 2 ? await stereoToMono(floatSamples) : floatSamples;
         } else {
-          pcm = extractInt16PCM(view, dataStart, dataEnd);
-          if (cafChannels === 2) {
-            const mono: number[] = [];
-            for (let i = 0; i + 1 < pcm.length; i += 2) mono.push((pcm[i] + pcm[i + 1]) / 2);
-            pcm = mono;
-          }
+          const raw = await extractInt16PCM(view, dataStart, dataEnd);
+          pcm = cafChannels === 2 ? await stereoToMono(raw) : raw;
         }
         if (pcm.length === 0) throw new Error(`CAF data empty: start=${dataStart} end=${dataEnd} file=${bytes.length} chunks=[${log.join(',')}]`);
-        return resampleTo16k(pcm, cafSampleRate);
+        return await resampleTo16k(pcm, cafSampleRate);
       }
       if (streaming) break;
       offset += 12 + size;
@@ -311,7 +326,7 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
         = new AudioContext();
       const audioBuffer = await ctx.decodeAudioData(bytes.buffer);
       const channelData = audioBuffer.getChannelData(0);
-      return resampleTo16k(Array.from(channelData), audioBuffer.sampleRate);
+      return await resampleTo16k(Array.from(channelData), audioBuffer.sampleRate);
     } catch {
       throw new Error('Android m4a transcription requires react-native-audio-api — run: npx expo install react-native-audio-api, then rebuild via EAS.');
     }
@@ -322,6 +337,19 @@ async function decodeAudioToPCM(uri: string): Promise<number[]> {
 // ---------------------------------------------------------------------------
 // Worker components — each mounts exactly one ExecuTorch hook
 // ---------------------------------------------------------------------------
+
+class AIWorkerErrorBoundary extends React.Component<
+  PropsWithChildren<{ onError: (err: string) => void }>,
+  { hasError: boolean }
+> {
+  constructor(props: PropsWithChildren<{ onError: (err: string) => void }>) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() { return { hasError: true }; }
+  componentDidCatch(error: Error) { this.props.onError(error.message); }
+  render() { return this.state.hasError ? null : this.props.children; }
+}
 
 function TranscriptionWorker({
   job,
@@ -553,9 +581,12 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   dispatchRef.current        = dispatch;
   const cancelledAnalysisRef  = useRef<Set<string>>(new Set());
   const moonshineEverReadyRef = useRef(false);
+  const mountedRef            = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const handleError = useCallback(
     (err: string) => {
+      if (!mountedRef.current) return;
       setModelError(err);
       const active = queue.active;
       if (active) {
@@ -576,6 +607,7 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
     async (recordingId: string, transcript: string) => {
       try {
         await updateRecording(recordingId, { transcript: transcript || '', transcript_edited: 0 });
+        if (!mountedRef.current) return;
         setFailedIds(prev => { const n = new Set(prev); n.delete(recordingId); return n; });
         if (transcript.trim()) {
           dispatchRef.current({ type: 'NEXT', insertFront: { type: 'tag', recordingId, transcript } });
@@ -583,6 +615,8 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
           dispatchRef.current({ type: 'NEXT' });
         }
       } catch {
+        if (!mountedRef.current) return;
+        setFailedIds(prev => new Set([...prev, recordingId]));
         dispatchRef.current({ type: 'NEXT' });
       }
     },
@@ -591,39 +625,46 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
 
   const handleTagsDone = useCallback(
     async (recordingId: string, response: string) => {
-      const walkType = parseWalkType(response);
-      if (walkType) {
-        await updateRecording(recordingId, { tags: walkType });
+      try {
+        const walkType = parseWalkType(response);
+        if (walkType) {
+          await updateRecording(recordingId, { tags: walkType });
+        }
+      } finally {
+        if (mountedRef.current) dispatchRef.current({ type: 'NEXT' });
       }
-      dispatchRef.current({ type: 'NEXT' });
     },
     [updateRecording]
   );
 
   const handleAnalyzeDone = useCallback(
-    (sessionId: string, response: string) => {
+    async (sessionId: string, response: string) => {
+      if (!mountedRef.current) return;
       if (cancelledAnalysisRef.current.has(sessionId)) {
         cancelledAnalysisRef.current.delete(sessionId);
         dispatchRef.current({ type: 'NEXT' });
         return;
       }
       const { title, keyPoints, actions, summary } = parseAnalysisResponse(response);
-      updateSession(sessionId, {
-        title:      title || null,
-        key_points: keyPoints.length > 0 ? JSON.stringify(keyPoints) : null,
-        actions:    actions.length   > 0 ? JSON.stringify(actions)   : null,
-        summary:    summary || null,
-      });
-      if (title) {
-        try {
-          const Notifications = require('expo-notifications');
-          Notifications.scheduleNotificationAsync({
-            content: { title: 'Walk summary ready', body: title },
-            trigger: null,
-          });
-        } catch { /* native module not available in this build */ }
+      try {
+        await updateSession(sessionId, {
+          title:      title || null,
+          key_points: keyPoints.length > 0 ? JSON.stringify(keyPoints) : null,
+          actions:    actions.length   > 0 ? JSON.stringify(actions)   : null,
+          summary:    summary || null,
+        });
+        if (title) {
+          try {
+            const Notifications = require('expo-notifications');
+            Notifications.scheduleNotificationAsync({
+              content: { title: 'Walk summary ready', body: title },
+              trigger: null,
+            });
+          } catch { /* native module not available in this build */ }
+        }
+      } finally {
+        if (mountedRef.current) dispatchRef.current({ type: 'NEXT' });
       }
-      dispatchRef.current({ type: 'NEXT' });
     },
     [updateSession]
   );
@@ -665,26 +706,32 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
     <AIQueueContext.Provider value={value}>
       {children}
       {queue.active?.type !== 'tag' && queue.active?.type !== 'analyze' && (
-        <TranscriptionWorker
-          job={queue.active?.type === 'transcribe' ? queue.active : null}
-          onDone={handleTranscriptionDone}
-          onProgress={setModelDownloadProgress}
-          onReady={handleModelReady}
-          onError={handleError}
-        />
+        <AIWorkerErrorBoundary key={queue.active?.recordingId ?? 'idle'} onError={handleError}>
+          <TranscriptionWorker
+            job={queue.active?.type === 'transcribe' ? queue.active : null}
+            onDone={handleTranscriptionDone}
+            onProgress={setModelDownloadProgress}
+            onReady={handleModelReady}
+            onError={handleError}
+          />
+        </AIWorkerErrorBoundary>
       )}
       {queue.active?.type === 'tag' && (
-        <TagWorker
-          recordingId={queue.active.recordingId}
-          transcript={queue.active.transcript}
-          onDone={handleTagsDone}
-        />
+        <AIWorkerErrorBoundary key={queue.active.recordingId} onError={handleError}>
+          <TagWorker
+            recordingId={queue.active.recordingId}
+            transcript={queue.active.transcript}
+            onDone={handleTagsDone}
+          />
+        </AIWorkerErrorBoundary>
       )}
       {queue.active?.type === 'analyze' && (
-        <AnalyzeWorker
-          job={queue.active}
-          onDone={handleAnalyzeDone}
-        />
+        <AIWorkerErrorBoundary key={queue.active.sessionId} onError={handleError}>
+          <AnalyzeWorker
+            job={queue.active}
+            onDone={handleAnalyzeDone}
+          />
+        </AIWorkerErrorBoundary>
       )}
     </AIQueueContext.Provider>
   );

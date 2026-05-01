@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
+  Dimensions,
+  Modal,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -14,13 +17,15 @@ import { Stack, useLocalSearchParams } from 'expo-router';
 import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import type { AudioPlayer, AudioStatus } from 'expo-audio';
 import { File } from 'expo-file-system';
+import * as Calendar from 'expo-calendar';
+import { captureRef } from 'react-native-view-shot';
 
 import { C } from '@/constants/theme';
 import { WaveformScrubber } from '@/components/WaveformScrubber';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useRecordingsContext, type RecordingEntry } from '@/context/recordings-context';
 import { useSessionsContext } from '@/context/sessions-context';
-import { useAIQueue, type WalkType, VALID_WALK_TYPES, WALK_TYPE_LABELS } from '@/context/ai-queue-context';
+import { useAIQueue, type WalkType, VALID_WALK_TYPES, WALK_TYPE_LABELS, WALK_TYPE_DESCRIPTIONS } from '@/context/ai-queue-context';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -101,8 +106,11 @@ function TypePicker({
           onPress={() => onSelect(type)}
           style={[pickerStyles.chip, selected === type && pickerStyles.chipActive]}
         >
-          <Text style={[pickerStyles.chipText, selected === type && pickerStyles.chipTextActive]}>
+          <Text style={[pickerStyles.chipLabel, selected === type && pickerStyles.chipLabelActive]}>
             {WALK_TYPE_LABELS[type]}
+          </Text>
+          <Text style={[pickerStyles.chipDesc, selected === type && pickerStyles.chipDescActive]}>
+            {WALK_TYPE_DESCRIPTIONS[type]}
           </Text>
         </Pressable>
       ))}
@@ -119,23 +127,33 @@ const pickerStyles = StyleSheet.create({
   },
   chip: {
     paddingHorizontal: 14,
-    paddingVertical:    7,
-    borderRadius:      20,
+    paddingVertical:   10,
+    borderRadius:      12,
     backgroundColor:   C.surfaceHigh,
     borderWidth:       1,
     borderColor:       C.border,
+    gap:                2,
   },
   chipActive: {
     backgroundColor: C.tint,
     borderColor:     C.tint,
   },
-  chipText: {
+  chipLabel: {
     fontSize:   13,
-    fontWeight: '500',
+    fontWeight: '600',
     color:      C.textSecondary,
   },
-  chipTextActive: {
+  chipLabelActive: {
     color: C.text,
+  },
+  chipDesc: {
+    fontSize:   11,
+    color:      C.textTertiary,
+    lineHeight: 15,
+  },
+  chipDescActive: {
+    color:   C.text,
+    opacity: 0.75,
   },
 });
 
@@ -156,13 +174,24 @@ function EditableText({
   containerStyle?: any;
   multiline?:      boolean;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft]     = useState('');
+  const [editing, setEditing]   = useState(false);
+  const [draft, setDraft]       = useState('');
+  const [justSaved, setJustSaved] = useState(false);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+  }, []);
 
   function commit() {
     setEditing(false);
     const trimmed = draft.trim();
-    if (trimmed !== value) onSave(trimmed);
+    if (trimmed !== value) {
+      onSave(trimmed);
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+      setJustSaved(true);
+      savedTimerRef.current = setTimeout(() => setJustSaved(false), 1500);
+    }
   }
 
   if (editing) {
@@ -183,6 +212,9 @@ function EditableText({
   return (
     <Pressable onPress={() => { setDraft(value); setEditing(true); }} hitSlop={4} style={containerStyle}>
       <Text style={style}>{value}</Text>
+      {justSaved && (
+        <Text style={{ fontSize: 11, color: C.green, marginTop: 3 }}>✓ saved</Text>
+      )}
     </Pressable>
   );
 }
@@ -634,6 +666,542 @@ const clipStyles = StyleSheet.create({
 });
 
 // ---------------------------------------------------------------------------
+// ShareSheet
+// ---------------------------------------------------------------------------
+
+const CARD_WIDTH = Dimensions.get('window').width - 80;
+
+function ShareSheet({
+  visible,
+  onClose,
+  onShareText,
+  title,
+  walkType,
+  summary,
+  keyPoints,
+  actions,
+  durationMs,
+  steps,
+  thoughtCount,
+}: {
+  visible:      boolean;
+  onClose:      () => void;
+  onShareText:  () => void;
+  title:        string | null;
+  walkType:     WalkType | null;
+  summary:      string | null;
+  keyPoints:    string[];
+  actions:      string[];
+  durationMs:   number;
+  steps:        number;
+  thoughtCount: number;
+}) {
+  const cardRef              = useRef<View>(null);
+  const [sharing, setSharing] = useState(false);
+
+  const cardItems   = (walkType === 'plan'       ? actions
+                    : walkType === 'brainstorm'  ? keyPoints
+                    : walkType === 'appreciate'  ? keyPoints
+                    : walkType === 'untangle'    ? keyPoints
+                    : []).slice(0, 3);
+  const cardSummary = (walkType === 'vent' || walkType === 'reflect' || walkType === 'untangle')
+    ? summary : null;
+  const useCheckbox = walkType === 'plan';
+
+  async function captureAndShare() {
+    if (!cardRef.current) return;
+    setSharing(true);
+    try {
+      const uri = await captureRef(cardRef, { format: 'png', quality: 0.95, result: 'tmpfile' });
+      await Share.share({ url: uri });
+    } catch {
+      Alert.alert('Could not share image', 'Try sharing as text instead.');
+    } finally {
+      setSharing(false);
+    }
+  }
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <Pressable style={shareSheetStyles.backdrop} onPress={onClose} />
+      <View style={shareSheetStyles.sheet}>
+        <View style={shareSheetStyles.handle} />
+        <Text style={shareSheetStyles.sheetTitle}>Share walk</Text>
+
+        {/* Card — this view is captured as the share image */}
+        <View style={shareSheetStyles.cardWrap}>
+          <View ref={cardRef} style={shareSheetStyles.card} collapsable={false}>
+            <View style={shareSheetStyles.cardHeader}>
+              <Text style={shareSheetStyles.cardWordmark}>stride</Text>
+              {walkType && (
+                <View style={shareSheetStyles.cardBadge}>
+                  <Text style={shareSheetStyles.cardBadgeText}>{WALK_TYPE_LABELS[walkType]}</Text>
+                </View>
+              )}
+            </View>
+
+            {title ? (
+              <Text style={shareSheetStyles.cardTitle} numberOfLines={2}>{title}</Text>
+            ) : null}
+
+            <View style={shareSheetStyles.cardDivider} />
+            <View style={shareSheetStyles.cardStats}>
+              {durationMs > 0 && (
+                <Text style={shareSheetStyles.cardStat}>{formatDurationShort(durationMs)}</Text>
+              )}
+              {steps > 0 && (
+                <Text style={shareSheetStyles.cardStat}>{steps.toLocaleString()} steps</Text>
+              )}
+              {thoughtCount > 0 && (
+                <Text style={shareSheetStyles.cardStat}>
+                  {thoughtCount} thought{thoughtCount !== 1 ? 's' : ''}
+                </Text>
+              )}
+            </View>
+            <View style={shareSheetStyles.cardDivider} />
+
+            {cardItems.length > 0 && (
+              <View style={shareSheetStyles.cardContent}>
+                {cardItems.map((item, i) => (
+                  <View key={i} style={shareSheetStyles.cardItemRow}>
+                    <Text style={shareSheetStyles.cardBullet}>{useCheckbox ? '☐' : '•'}</Text>
+                    <Text style={shareSheetStyles.cardItemText} numberOfLines={2}>{item}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {cardSummary ? (
+              <Text style={shareSheetStyles.cardSummary} numberOfLines={3}>{cardSummary}</Text>
+            ) : null}
+
+            <Text style={shareSheetStyles.cardAttribution}>stride</Text>
+          </View>
+        </View>
+
+        <Pressable
+          style={[shareSheetStyles.primaryBtn, sharing && { opacity: 0.5 }]}
+          onPress={captureAndShare}
+          disabled={sharing}
+        >
+          <IconSymbol name="photo" size={15} color={C.text} />
+          <Text style={shareSheetStyles.primaryBtnText}>
+            {sharing ? 'Sharing…' : 'Share image'}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          style={shareSheetStyles.textBtn}
+          onPress={() => { onClose(); onShareText(); }}
+        >
+          <Text style={shareSheetStyles.textBtnText}>Share as text</Text>
+        </Pressable>
+      </View>
+    </Modal>
+  );
+}
+
+const shareSheetStyles = StyleSheet.create({
+  backdrop: {
+    flex:            1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  sheet: {
+    backgroundColor:     C.surface,
+    borderTopLeftRadius:  20,
+    borderTopRightRadius: 20,
+    padding:             20,
+    paddingBottom:        40,
+    gap:                 12,
+    alignItems:          'center',
+  },
+  handle: {
+    width:           36,
+    height:           4,
+    borderRadius:     2,
+    backgroundColor:  C.border,
+    alignSelf:       'center',
+    marginBottom:     4,
+  },
+  sheetTitle: {
+    fontSize:   17,
+    fontWeight: '600',
+    color:      C.text,
+    alignSelf:  'flex-start',
+    marginBottom: 4,
+  },
+  cardWrap: {
+    width:      '100%',
+    alignItems: 'center',
+  },
+  card: {
+    width:           CARD_WIDTH,
+    backgroundColor: C.surfaceHigh,
+    borderRadius:    16,
+    padding:         20,
+    gap:             12,
+    borderWidth:     1,
+    borderColor:     C.border,
+  },
+  cardHeader: {
+    flexDirection:  'row',
+    justifyContent: 'space-between',
+    alignItems:     'center',
+  },
+  cardWordmark: {
+    fontSize:      13,
+    fontWeight:    '700',
+    color:         C.tint,
+    letterSpacing: -0.3,
+  },
+  cardBadge: {
+    backgroundColor: C.tint + '22',
+    borderRadius:    6,
+    paddingHorizontal: 8,
+    paddingVertical:   3,
+    borderWidth:     1,
+    borderColor:     C.tint + '44',
+  },
+  cardBadgeText: {
+    fontSize:   11,
+    fontWeight: '600',
+    color:      C.tint,
+  },
+  cardTitle: {
+    fontSize:      20,
+    fontWeight:    '700',
+    color:         C.text,
+    letterSpacing: -0.3,
+    lineHeight:    26,
+  },
+  cardDivider: {
+    height:          StyleSheet.hairlineWidth,
+    backgroundColor: C.border,
+  },
+  cardStats: {
+    flexDirection: 'row',
+    gap:            12,
+    flexWrap:      'wrap',
+  },
+  cardStat: {
+    fontSize:   12,
+    color:      C.textSecondary,
+    fontWeight: '500',
+  },
+  cardContent: {
+    gap: 6,
+  },
+  cardItemRow: {
+    flexDirection: 'row',
+    gap:            8,
+    alignItems:    'flex-start',
+  },
+  cardBullet: {
+    fontSize:   13,
+    color:      C.tint,
+    lineHeight: 19,
+  },
+  cardItemText: {
+    flex:       1,
+    fontSize:   13,
+    color:      C.text,
+    lineHeight: 19,
+  },
+  cardSummary: {
+    fontSize:   13,
+    color:      C.textSecondary,
+    lineHeight: 20,
+    fontStyle:  'italic',
+  },
+  cardAttribution: {
+    fontSize:      10,
+    color:         C.textTertiary,
+    textAlign:     'right',
+    marginTop:      4,
+    letterSpacing: 0.5,
+  },
+  primaryBtn: {
+    flexDirection:   'row',
+    alignItems:      'center',
+    justifyContent:  'center',
+    gap:              8,
+    backgroundColor: C.tint,
+    borderRadius:    12,
+    paddingVertical: 14,
+    width:           '100%',
+  },
+  primaryBtnText: {
+    fontSize:   15,
+    fontWeight: '600',
+    color:      C.text,
+  },
+  textBtn: {
+    alignItems:    'center',
+    paddingVertical: 8,
+    width:         '100%',
+  },
+  textBtnText: {
+    fontSize: 14,
+    color:    C.textSecondary,
+  },
+});
+
+// ---------------------------------------------------------------------------
+// RemindersSheet
+// ---------------------------------------------------------------------------
+
+const DATE_OPTIONS = [
+  { label: 'Today',     offset: 0 },
+  { label: 'Tomorrow',  offset: 1 },
+  { label: 'In 2 days', offset: 2 },
+  { label: 'Next week', offset: 7 },
+];
+
+const TIME_OPTIONS = [
+  { label: '9 AM',  hour: 9  },
+  { label: 'Noon',  hour: 12 },
+  { label: '5 PM',  hour: 17 },
+  { label: '8 PM',  hour: 20 },
+];
+
+function RemindersSheet({
+  actions,
+  visible,
+  onClose,
+}: {
+  actions: string[];
+  visible: boolean;
+  onClose: () => void;
+}) {
+  const [selected,    setSelected]    = useState<Set<number>>(new Set());
+  const [dateOffset,  setDateOffset]  = useState(1);
+  const [timeHour,    setTimeHour]    = useState(9);
+  const [adding,      setAdding]      = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      setSelected(new Set(actions.map((_, i) => i)));
+      setDateOffset(1);
+      setTimeHour(9);
+    }
+  }, [visible, actions]);
+
+  function toggle(i: number) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i); else next.add(i);
+      return next;
+    });
+  }
+
+  async function handleAdd() {
+    if (selected.size === 0 || adding) return;
+    setAdding(true);
+    try {
+      const { status } = await Calendar.requestRemindersPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission needed', 'Go to Settings → Stride → Reminders to allow access.');
+        return;
+      }
+      const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.REMINDER);
+      const cal = calendars.find(c => c.allowsModifications) ?? calendars[0];
+      if (!cal) { Alert.alert('No Reminders calendar found.'); return; }
+
+      const dueDate = new Date();
+      dueDate.setDate(dueDate.getDate() + dateOffset);
+      dueDate.setHours(timeHour, 0, 0, 0);
+
+      await Promise.all(
+        actions
+          .filter((_, i) => selected.has(i))
+          .map(title => Calendar.createReminderAsync(cal.id, {
+            title,
+            dueDate,
+            alarms: [{ relativeOffset: 0 }],
+          }))
+      );
+      onClose();
+    } catch {
+      Alert.alert('Could not add reminders', 'Please try again.');
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  const count = selected.size;
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <Pressable style={reminderStyles.backdrop} onPress={onClose} />
+      <View style={reminderStyles.sheet}>
+        <View style={reminderStyles.handle} />
+        <Text style={reminderStyles.sheetTitle}>Add to Reminders</Text>
+
+        <View style={reminderStyles.actionList}>
+          {actions.map((action, i) => (
+            <Pressable key={i} onPress={() => toggle(i)} style={reminderStyles.actionRow}>
+              <View style={[reminderStyles.checkbox, selected.has(i) && reminderStyles.checkboxChecked]}>
+                {selected.has(i) && <IconSymbol name="checkmark" size={10} color={C.background} />}
+              </View>
+              <Text style={reminderStyles.actionText}>{action}</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <Text style={reminderStyles.groupLabel}>DATE</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={reminderStyles.chipRow}>
+          {DATE_OPTIONS.map(opt => (
+            <Pressable
+              key={opt.label}
+              onPress={() => setDateOffset(opt.offset)}
+              style={[reminderStyles.chip, dateOffset === opt.offset && reminderStyles.chipActive]}
+            >
+              <Text style={[reminderStyles.chipText, dateOffset === opt.offset && reminderStyles.chipTextActive]}>
+                {opt.label}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+
+        <Text style={reminderStyles.groupLabel}>TIME</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={reminderStyles.chipRow}>
+          {TIME_OPTIONS.map(opt => (
+            <Pressable
+              key={opt.label}
+              onPress={() => setTimeHour(opt.hour)}
+              style={[reminderStyles.chip, timeHour === opt.hour && reminderStyles.chipActive]}
+            >
+              <Text style={[reminderStyles.chipText, timeHour === opt.hour && reminderStyles.chipTextActive]}>
+                {opt.label}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+
+        <Pressable
+          style={[reminderStyles.addBtn, (count === 0 || adding) && reminderStyles.addBtnDisabled]}
+          onPress={handleAdd}
+          disabled={count === 0 || adding}
+        >
+          <IconSymbol name="bell" size={15} color={C.text} />
+          <Text style={reminderStyles.addBtnText}>
+            {adding ? 'Adding…' : `Add ${count} reminder${count !== 1 ? 's' : ''}`}
+          </Text>
+        </Pressable>
+      </View>
+    </Modal>
+  );
+}
+
+const reminderStyles = StyleSheet.create({
+  backdrop: {
+    flex:            1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  sheet: {
+    backgroundColor:     C.surface,
+    borderTopLeftRadius:  20,
+    borderTopRightRadius: 20,
+    padding:             20,
+    paddingBottom:        40,
+    gap:                 12,
+  },
+  handle: {
+    width:           36,
+    height:           4,
+    borderRadius:     2,
+    backgroundColor:  C.border,
+    alignSelf:       'center',
+    marginBottom:     4,
+  },
+  sheetTitle: {
+    fontSize:   17,
+    fontWeight: '600',
+    color:      C.text,
+    marginBottom: 4,
+  },
+  actionList: {
+    gap: 2,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems:    'center',
+    gap:           12,
+    paddingVertical: 9,
+  },
+  checkbox: {
+    width:           18,
+    height:          18,
+    borderRadius:     5,
+    borderWidth:      1.5,
+    borderColor:      C.tint,
+    flexShrink:       0,
+    alignItems:      'center',
+    justifyContent:  'center',
+  },
+  checkboxChecked: {
+    backgroundColor: C.tint,
+  },
+  actionText: {
+    flex:       1,
+    fontSize:   15,
+    color:      C.text,
+    lineHeight: 22,
+  },
+  groupLabel: {
+    fontSize:      11,
+    fontWeight:    '600',
+    color:         C.textTertiary,
+    letterSpacing: 1.2,
+    marginTop:      4,
+    marginBottom:  -4,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    gap:            8,
+    paddingVertical: 4,
+  },
+  chip: {
+    paddingHorizontal: 14,
+    paddingVertical:    7,
+    borderRadius:      20,
+    backgroundColor:   C.surfaceHigh,
+    borderWidth:       1,
+    borderColor:       C.border,
+  },
+  chipActive: {
+    backgroundColor: C.tint,
+    borderColor:     C.tint,
+  },
+  chipText: {
+    fontSize:   13,
+    color:      C.textSecondary,
+    fontWeight: '500',
+  },
+  chipTextActive: {
+    color: C.text,
+  },
+  addBtn: {
+    flexDirection:   'row',
+    alignItems:      'center',
+    justifyContent:  'center',
+    gap:              8,
+    backgroundColor: C.tint,
+    borderRadius:    12,
+    paddingVertical: 14,
+    marginTop:        8,
+  },
+  addBtnDisabled: {
+    opacity: 0.4,
+  },
+  addBtnText: {
+    fontSize:   15,
+    fontWeight: '600',
+    color:      C.text,
+  },
+});
+
+// ---------------------------------------------------------------------------
 // WalkSummaryScreen
 // ---------------------------------------------------------------------------
 
@@ -710,6 +1278,8 @@ export default function WalkSummaryScreen() {
   const [showSummaryOverlay, setShowSummaryOverlay] = useState(false);
   const [isResummarizing, setIsResummarizing]    = useState(false);
   const [cancelling, setCancelling]              = useState(false);
+  const [showReminders, setShowReminders]        = useState(false);
+  const [showShareSheet, setShowShareSheet]      = useState(false);
 
   useEffect(() => {
     if (!isAnalyzing) setCancelling(false);
@@ -1004,7 +1574,7 @@ export default function WalkSummaryScreen() {
           title:           session?.title ?? 'Walk',
           headerBackTitle: 'Done',
           headerRight: () => (
-            <Pressable onPress={handleShare} style={{ padding: 8, marginTop: 2 }}>
+            <Pressable onPress={() => setShowShareSheet(true)} style={{ padding: 8, marginTop: 2 }}>
               <IconSymbol name="square.and.arrow.up" size={20} color={C.tint} />
             </Pressable>
           ),
@@ -1230,6 +1800,15 @@ export default function WalkSummaryScreen() {
                     onUpdateKeyPoint={handleUpdateKeyPoint}
                     onUpdateAction={handleUpdateAction}
                   />
+                  {Platform.OS === 'ios' && walkType === 'plan' && actions.length > 0 && (
+                    <Pressable
+                      style={styles.addRemindersBtn}
+                      onPress={() => setShowReminders(true)}
+                    >
+                      <IconSymbol name="bell" size={14} color={C.tint} />
+                      <Text style={styles.addRemindersBtnText}>Add to Reminders</Text>
+                    </Pressable>
+                  )}
                 </View>
               ) : (
                 sessionRecordings.map((item, index) => (
@@ -1261,6 +1840,26 @@ export default function WalkSummaryScreen() {
           )}
         </ScrollView>
       </SafeAreaView>
+
+      <RemindersSheet
+        actions={actions}
+        visible={showReminders}
+        onClose={() => setShowReminders(false)}
+      />
+
+      <ShareSheet
+        visible={showShareSheet}
+        onClose={() => setShowShareSheet(false)}
+        onShareText={handleShare}
+        title={session?.title ?? null}
+        walkType={walkType}
+        summary={session?.summary ?? null}
+        keyPoints={keyPoints}
+        actions={actions}
+        durationMs={durationMs}
+        steps={steps}
+        thoughtCount={sessionRecordings.length}
+      />
     </>
   );
 }
@@ -1472,5 +2071,22 @@ const styles = StyleSheet.create({
   emptyText: {
     fontSize: 15,
     color:    C.textSecondary,
+  },
+
+  addRemindersBtn: {
+    flexDirection:  'row',
+    alignItems:     'center',
+    justifyContent: 'center',
+    gap:             6,
+    paddingVertical: 12,
+    borderRadius:   12,
+    borderWidth:    1,
+    borderColor:    C.tint,
+    marginTop:       8,
+  },
+  addRemindersBtnText: {
+    fontSize:   14,
+    fontWeight: '500',
+    color:      C.tint,
   },
 });

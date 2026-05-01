@@ -11,6 +11,8 @@ import { useRouter } from 'expo-router';
 import { C } from '@/constants/theme';
 import { useSessionsContext, type SessionEntry } from '@/context/sessions-context';
 import { useRecordingsContext } from '@/context/recordings-context';
+import { IconSymbol } from '@/components/ui/icon-symbol';
+import { VALID_WALK_TYPES, WALK_TYPE_LABELS, type WalkType } from '@/context/ai-queue-context';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -148,6 +150,12 @@ export default function StatsScreen() {
   const totalSteps    = sessions.reduce((sum, s) => sum + s.steps, 0);
   const totalThoughts = recordings.length;
   const totalWalkMs   = sessions.reduce((sum, s) => sum + (s.ended_at - s.started_at), 0);
+  const avgWalkMs     = totalWalks > 0 ? totalWalkMs / totalWalks : 0;
+
+  const totalWords = recordings.reduce((sum, r) => {
+    const words = r.transcript?.trim().split(/\s+/).filter(Boolean) ?? [];
+    return sum + words.length;
+  }, 0);
 
   // ── Best walk ─────────────────────────────────────────────────────────────
 
@@ -155,19 +163,20 @@ export default function StatsScreen() {
     (best, s) => (!best || s.steps > best.steps ? s : best), null
   );
 
-  // ── Top tags ──────────────────────────────────────────────────────────────
+  // ── Walk type distribution ────────────────────────────────────────────────
 
-  const tagCounts: Record<string, number> = {};
-  recordings.forEach(r => {
-    if (r.tags) {
-      r.tags.split(',').filter(Boolean).forEach(tag => {
-        tagCounts[tag] = (tagCounts[tag] ?? 0) + 1;
-      });
+  const walkTypeCounts: Partial<Record<WalkType, number>> = {};
+  sessions.forEach(s => {
+    if (s.walk_type && (VALID_WALK_TYPES as readonly string[]).includes(s.walk_type)) {
+      const wt = s.walk_type as WalkType;
+      walkTypeCounts[wt] = (walkTypeCounts[wt] ?? 0) + 1;
     }
   });
-  const topTags = Object.entries(tagCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 6);
+  const usedWalkTypes = VALID_WALK_TYPES
+    .map(t => ({ type: t, count: walkTypeCounts[t] ?? 0 }))
+    .filter(({ count }) => count > 0)
+    .sort((a, b) => b.count - a.count);
+  const maxTypeCount = usedWalkTypes[0]?.count ?? 1;
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -183,7 +192,8 @@ export default function StatsScreen() {
       >
         {sessions.length === 0 ? (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyText}>No walks yet.</Text>
+            <IconSymbol name="chart.bar" size={36} color={C.textTertiary} />
+            <Text style={styles.emptyText}>No walks yet</Text>
             <Text style={styles.emptySubtext}>
               Complete your first walk to see stats here.
             </Text>
@@ -260,13 +270,18 @@ export default function StatsScreen() {
             <SectionHeader label="ALL TIME" />
             <View style={styles.statsGrid}>
               <View style={styles.statsGridRow}>
-                <StatCell value={totalWalks.toString()}         label="walks"     />
-                <StatCell value={formatCount(totalSteps)}        label="steps"     />
+                <StatCell value={totalWalks.toString()}        label="walks"        />
+                <StatCell value={formatCount(totalSteps)}      label="steps"        />
               </View>
               <View style={styles.statsGridDivider} />
               <View style={styles.statsGridRow}>
-                <StatCell value={totalThoughts.toString()}       label="thoughts"  />
-                <StatCell value={formatTotalTime(totalWalkMs)}   label="walk time" />
+                <StatCell value={totalThoughts.toString()}     label="thoughts"     />
+                <StatCell value={formatCount(totalWords)}      label="words spoken" />
+              </View>
+              <View style={styles.statsGridDivider} />
+              <View style={styles.statsGridRow}>
+                <StatCell value={formatTotalTime(totalWalkMs)} label="walk time"    />
+                <StatCell value={formatTotalTime(avgWalkMs)}   label="avg walk"     />
               </View>
             </View>
 
@@ -293,19 +308,25 @@ export default function StatsScreen() {
               </>
             )}
 
-            {/* ── Top tags ───────────────────────────────────────────────── */}
-            {topTags.length > 0 && (
+            {/* ── Walk type distribution ──────────────────────────────────── */}
+            {usedWalkTypes.length > 0 && (
               <>
-                <SectionHeader label="TOP TAGS" />
+                <SectionHeader label="WALK TYPES" />
                 <View style={styles.tagsCard}>
-                  {topTags.map(([tag, count], i) => (
-                    <View key={tag}>
+                  {usedWalkTypes.map(({ type, count }, i) => (
+                    <View key={type}>
                       {i > 0 && <View style={styles.tagDivider} />}
-                      <View style={styles.tagRow}>
-                        <Text style={styles.tagName}>{tag}</Text>
-                        <Text style={styles.tagCount}>
-                          {count} {count === 1 ? 'time' : 'times'}
-                        </Text>
+                      <View style={styles.typeRow}>
+                        <Text style={styles.tagName}>{WALK_TYPE_LABELS[type]}</Text>
+                        <View style={styles.typeBarTrack}>
+                          <View
+                            style={[
+                              styles.typeBarFill,
+                              { width: `${Math.round((count / maxTypeCount) * 100)}%` },
+                            ]}
+                          />
+                        </View>
+                        <Text style={styles.tagCount}>{count}</Text>
                       </View>
                     </View>
                   ))}
@@ -522,13 +543,6 @@ const styles = StyleSheet.create({
     borderRadius:    16,
     overflow:        'hidden',
   },
-  tagRow: {
-    flexDirection:     'row',
-    justifyContent:    'space-between',
-    alignItems:        'center',
-    paddingHorizontal: 16,
-    paddingVertical:   14,
-  },
   tagDivider: {
     height:          StyleSheet.hairlineWidth,
     backgroundColor: C.border,
@@ -538,10 +552,32 @@ const styles = StyleSheet.create({
     fontSize:   15,
     color:      C.text,
     fontWeight: '500',
+    width:      90,
   },
   tagCount: {
     fontSize: 13,
     color:    C.textTertiary,
+    width:    24,
+    textAlign: 'right',
+  },
+  typeRow: {
+    flexDirection:     'row',
+    alignItems:        'center',
+    paddingHorizontal: 16,
+    paddingVertical:   13,
+    gap:               12,
+  },
+  typeBarTrack: {
+    flex:            1,
+    height:          4,
+    borderRadius:    2,
+    backgroundColor: C.surfaceHigh,
+    overflow:        'hidden',
+  },
+  typeBarFill: {
+    height:          4,
+    borderRadius:    2,
+    backgroundColor: C.tint,
   },
 
   // ── Empty ─────────────────────────────────────────────────────────────────

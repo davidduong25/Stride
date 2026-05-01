@@ -1,8 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
 import * as SQLite from 'expo-sqlite';
 import { File } from 'expo-file-system';
+import {
+  documentDirectory,
+  makeDirectoryAsync,
+  readAsStringAsync,
+  writeAsStringAsync,
+  deleteAsync,
+} from 'expo-file-system/legacy';
 
-const DB_NAME = 'momentum.db';
+const DB_NAME     = 'momentum.db';
+const WAVEFORM_DIR = `${documentDirectory ?? ''}waveforms/`;
+
+function waveformPath(id: string): string {
+  return `${WAVEFORM_DIR}${id}.json`;
+}
+
+async function readWaveformFile(id: string): Promise<string | null> {
+  try { return await readAsStringAsync(waveformPath(id)); } catch { return null; }
+}
 
 export type RecordingEntry = {
   id: string;
@@ -13,12 +29,12 @@ export type RecordingEntry = {
   transcript: string | null;
   tags: string | null;       // comma-separated, e.g. "idea,plan"
   steps: number | null;      // cumulative pedometer count at stop time
-  waveform: string | null;   // JSON array of dB samples
+  waveform: string | null;   // JSON array of dB samples (loaded from file, not DB)
   transcript_edited: number | null; // 1 if user has manually edited the transcript
 };
 
 type PatchFields = Partial<Pick<RecordingEntry,
-  'duration' | 'filename' | 'transcript' | 'tags' | 'steps' | 'waveform' | 'transcript_edited'
+  'duration' | 'filename' | 'transcript' | 'tags' | 'steps' | 'transcript_edited'
 >>;
 
 export function useRecordings() {
@@ -39,7 +55,6 @@ export function useRecordings() {
         );
       `);
 
-      // Schema migrations — ALTER TABLE has no IF NOT EXISTS; catch duplicate-column errors
       const migrations = [
         'ALTER TABLE recordings ADD COLUMN transcript TEXT',
         'ALTER TABLE recordings ADD COLUMN tags TEXT',
@@ -51,11 +66,28 @@ export function useRecordings() {
         try { await db.execAsync(sql); } catch { /* column already exists */ }
       }
 
-      dbRef.current = db;
-      const rows = await db.getAllAsync<RecordingEntry>(
-        'SELECT * FROM recordings ORDER BY date DESC'
+      // Ensure waveform directory exists
+      await makeDirectoryAsync(WAVEFORM_DIR, { intermediates: true }).catch(() => {});
+
+      // Migrate waveform data from DB column to flat files (runs once per row, then column stays NULL)
+      const toMigrate = await db.getAllAsync<{ id: string; waveform: string }>(
+        'SELECT id, waveform FROM recordings WHERE waveform IS NOT NULL'
       );
-      setRecordings(rows);
+      for (const row of toMigrate) {
+        await writeAsStringAsync(waveformPath(row.id), row.waveform).catch(() => {});
+        await db.runAsync('UPDATE recordings SET waveform = NULL WHERE id = ?', [row.id]);
+      }
+
+      dbRef.current = db;
+
+      // Load recordings without the waveform column (always NULL post-migration)
+      const rows = await db.getAllAsync<Omit<RecordingEntry, 'waveform'>>(
+        'SELECT id, filename, uri, duration, date, transcript, tags, steps, transcript_edited FROM recordings ORDER BY date DESC'
+      );
+
+      // Inject waveforms from files in parallel
+      const waveforms = await Promise.all(rows.map(r => readWaveformFile(r.id)));
+      setRecordings(rows.map((r, i) => ({ ...r, waveform: waveforms[i] })));
     }
     init();
     return () => {
@@ -73,16 +105,18 @@ export function useRecordings() {
     };
     await dbRef.current.runAsync(
       `INSERT INTO recordings
-        (id, filename, uri, duration, date, transcript, tags, steps, waveform, transcript_edited)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, filename, uri, duration, date, transcript, tags, steps, transcript_edited)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         newEntry.id, newEntry.filename, newEntry.uri,
         newEntry.duration, newEntry.date,
         newEntry.transcript ?? null, newEntry.tags ?? null,
-        newEntry.steps ?? null, newEntry.waveform ?? null,
-        newEntry.transcript_edited ?? null,
+        newEntry.steps ?? null, newEntry.transcript_edited ?? null,
       ]
     );
+    if (newEntry.waveform) {
+      await writeAsStringAsync(waveformPath(newEntry.id), newEntry.waveform).catch(() => {});
+    }
     setRecordings(prev => [newEntry, ...prev]);
     return newEntry.id;
   }
@@ -108,12 +142,14 @@ export function useRecordings() {
     if (entry) {
       try { new File(entry.uri).delete(); } catch { /* file already gone */ }
     }
+    await deleteAsync(waveformPath(id), { idempotent: true }).catch(() => {});
   }
 
   async function clearAllRecordings() {
     if (!dbRef.current) return;
     for (const r of recordings) {
       try { new File(r.uri).delete(); } catch { /* file already gone */ }
+      await deleteAsync(waveformPath(r.id), { idempotent: true }).catch(() => {});
     }
     await dbRef.current.runAsync('DELETE FROM recordings');
     setRecordings([]);

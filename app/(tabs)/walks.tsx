@@ -15,6 +15,7 @@ import { useRecordingsContext } from '@/context/recordings-context';
 import { useSessionsContext, type SessionEntry } from '@/context/sessions-context';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { EllipsisMenu } from '@/components/EllipsisMenu';
+import { WALK_TYPE_LABELS, VALID_WALK_TYPES, type WalkType } from '@/context/ai-queue-context';
 
 // ---------------------------------------------------------------------------
 // Types & constants
@@ -224,7 +225,9 @@ export default function WalksScreen() {
               style={[styles.tagPill, selectedTag === tag && styles.tagPillActive]}
             >
               <Text style={[styles.tagPillText, selectedTag === tag && styles.tagPillTextActive]}>
-                {tag}
+                {(VALID_WALK_TYPES as readonly string[]).includes(tag)
+                  ? WALK_TYPE_LABELS[tag as WalkType]
+                  : tag}
               </Text>
             </Pressable>
           ))}
@@ -237,10 +240,19 @@ export default function WalksScreen() {
       >
         {displayed.length === 0 ? (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyText}>
-              {selectedTag ? `No "${selectedTag}" walks this ${filter}.` : `No walks this ${filter}.`}
-            </Text>
-            <Text style={styles.emptySubtext}>Start walking to record your first stride.</Text>
+            {sessions.length === 0 ? (
+              <>
+                <IconSymbol name="figure.walk" size={36} color={C.textTertiary} />
+                <Text style={styles.emptyText}>No walks yet</Text>
+                <Text style={styles.emptySubtext}>
+                  Head out for a walk, tap record, and think out loud. Your AI summary will appear here when you're done.
+                </Text>
+              </>
+            ) : (
+              <Text style={styles.emptyText}>
+                {selectedTag ? `No "${selectedTag}" walks this ${filter}.` : `No walks this ${filter}.`}
+              </Text>
+            )}
           </View>
         ) : (
           <>
@@ -283,7 +295,12 @@ export default function WalksScreen() {
                 {sessionTags(latestSession).length > 0 && (
                   <View style={styles.tagRow}>
                     {sessionTags(latestSession).map(tag => (
-                      <TagChip key={tag} label={tag} />
+                      <TagChip
+                        key={tag}
+                        label={(VALID_WALK_TYPES as readonly string[]).includes(tag)
+                          ? WALK_TYPE_LABELS[tag as WalkType]
+                          : tag}
+                      />
                     ))}
                   </View>
                 )}
@@ -332,7 +349,12 @@ export default function WalksScreen() {
                       {tags.length > 0 && (
                         <View style={[styles.tagRow, { marginTop: 6 }]}>
                           {tags.map(tag => (
-                            <TagChip key={tag} label={tag} />
+                            <TagChip
+                              key={tag}
+                              label={(VALID_WALK_TYPES as readonly string[]).includes(tag)
+                                ? WALK_TYPE_LABELS[tag as WalkType]
+                                : tag}
+                            />
                           ))}
                         </View>
                       )}

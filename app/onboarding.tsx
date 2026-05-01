@@ -13,6 +13,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { C } from '@/constants/theme';
 import { IconSymbol } from '@/components/ui/icon-symbol';
+import { VALID_WALK_TYPES, WALK_TYPE_LABELS, WALK_TYPE_DESCRIPTIONS } from '@/context/ai-queue-context';
 
 const { width: W } = Dimensions.get('window');
 
@@ -43,6 +44,57 @@ const SLIDES = [
   },
 ] as const;
 
+const TOTAL_PAGES = SLIDES.length + 1; // +1 for walk types page
+
+function WalkTypesPage() {
+  return (
+    <View style={[styles.slide, typePageStyles.slide]}>
+      <Text style={styles.title}>walk types</Text>
+      <Text style={styles.body}>Choose a mode — AI shapes your summary to match.</Text>
+      <View style={typePageStyles.grid}>
+        {VALID_WALK_TYPES.map(type => (
+          <View key={type} style={typePageStyles.card}>
+            <Text style={typePageStyles.cardLabel}>{WALK_TYPE_LABELS[type]}</Text>
+            <Text style={typePageStyles.cardDesc}>{WALK_TYPE_DESCRIPTIONS[type]}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+const typePageStyles = StyleSheet.create({
+  slide: {
+    justifyContent: 'center',
+    gap:            20,
+  },
+  grid: {
+    flexDirection: 'row',
+    flexWrap:      'wrap',
+    gap:            10,
+    width:         '100%',
+  },
+  card: {
+    width:           (W - 96) / 2,
+    backgroundColor: C.surface,
+    borderRadius:    14,
+    padding:         14,
+    gap:              4,
+    borderWidth:     1,
+    borderColor:     C.border,
+  },
+  cardLabel: {
+    fontSize:   14,
+    fontWeight: '600',
+    color:      C.text,
+  },
+  cardDesc: {
+    fontSize:   12,
+    color:      C.textSecondary,
+    lineHeight: 17,
+  },
+});
+
 export default function OnboardingScreen() {
   const router  = useRouter();
   const { replay } = useLocalSearchParams<{ replay?: string }>();
@@ -51,8 +103,8 @@ export default function OnboardingScreen() {
   const scrollRef = useRef<ScrollView>(null);
   const [index, setIndex] = useState(0);
 
-  const slide  = SLIDES[index];
-  const isLast = index === SLIDES.length - 1;
+  const slide  = index < SLIDES.length ? SLIDES[index] : null;
+  const isLast = index === TOTAL_PAGES - 1;
 
   function advance() {
     if (isLast) { finish(); return; }
@@ -60,6 +112,8 @@ export default function OnboardingScreen() {
     scrollRef.current?.scrollTo({ x: next * W, animated: true });
     setIndex(next);
   }
+
+  const dotColor = slide?.color ?? C.tint;
 
   async function finish() {
     if (isReplay) {
@@ -102,16 +156,17 @@ export default function OnboardingScreen() {
             <Text style={styles.body}>{s.body}</Text>
           </View>
         ))}
+        <WalkTypesPage />
       </ScrollView>
 
       {/* Dot indicators */}
       <View style={styles.dots}>
-        {SLIDES.map((_, i) => (
+        {Array.from({ length: TOTAL_PAGES }).map((_, i) => (
           <View
             key={i}
             style={[
               styles.dot,
-              i === index && { width: 22, backgroundColor: slide.color },
+              i === index && { width: 22, backgroundColor: dotColor },
             ]}
           />
         ))}
@@ -120,7 +175,7 @@ export default function OnboardingScreen() {
       {/* CTA */}
       <View style={styles.footer}>
         <Pressable
-          style={[styles.btn, { backgroundColor: slide.color }]}
+          style={[styles.btn, { backgroundColor: dotColor }]}
           onPress={advance}
         >
           <Text style={styles.btnText}>{isLast ? 'get started' : 'next'}</Text>

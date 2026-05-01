@@ -4,8 +4,15 @@ import { Stack, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import 'react-native-reanimated';
+import * as Sentry from '@sentry/react-native';
 
 import { C } from '@/constants/theme';
+
+Sentry.init({
+  dsn: process.env.EXPO_PUBLIC_SENTRY_DSN,
+  enabled: !!process.env.EXPO_PUBLIC_SENTRY_DSN,
+  tracesSampleRate: 0.2,
+});
 import { RecordingsProvider } from '@/context/recordings-context';
 import { SessionsProvider } from '@/context/sessions-context';
 import { AIQueueProvider } from '@/context/ai-queue-context';
@@ -30,7 +37,7 @@ export const unstable_settings = {
   anchor: '(tabs)',
 };
 
-export default function RootLayout() {
+function RootLayout() {
   const router = useRouter();
 
   useEffect(() => {
@@ -72,3 +79,5 @@ export default function RootLayout() {
     </ThemeProvider>
   );
 }
+
+export default Sentry.wrap(RootLayout);
