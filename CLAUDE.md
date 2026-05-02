@@ -2,13 +2,14 @@
 
 ## Current Version
 
-`1.0.0` — baseline. Bump `version` in `app.json` with every OTA push or EAS build, then log it below.
+`1.0.1` — baseline. Bump `version` in `app.json` with every OTA push or EAS build, then log it below.
 
 ## Edit Log
 
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0.0 | 2026-05-02 | Baseline — crash-safe transcription, swipe-to-delete, sort/filter sheet |
+| 1.0.1 | 2026-05-02 | Fix summarize loop; enable Sentry in EAS builds |
 
 > **Convention:** After every set of edits that gets pushed (OTA or EAS), increment the version in `app.json` and add a row here. Keep entries short — one line per version.
 

@@ -1266,7 +1266,12 @@ export default function WalkSummaryScreen() {
   const session   = sessions.find(s => s.id === sessionId);
   const keyPoints = parseJsonArray(session?.key_points ?? null);
   const actions   = parseJsonArray(session?.actions    ?? null);
-  const hasAI     = session?.title !== null && session?.title !== undefined;
+  const hasAI     = session !== undefined && (
+    session.title !== null ||
+    session.summary !== null ||
+    session.key_points !== null ||
+    session.actions !== null
+  );
   const isAnalyzing = analyzingSessionId === sessionId;
 
   const allTranscribed =
@@ -1524,7 +1529,7 @@ export default function WalkSummaryScreen() {
   async function handleShare() {
     const lines: string[] = [];
 
-    lines.push(session?.title ?? new Date(startedAt).toLocaleDateString(undefined, {
+    lines.push(session?.title || new Date(startedAt).toLocaleDateString(undefined, {
       weekday: 'long', month: 'long', day: 'numeric',
     }));
 
@@ -1609,7 +1614,7 @@ export default function WalkSummaryScreen() {
     <>
       <Stack.Screen
         options={{
-          title:           session?.title ?? 'Walk',
+          title:           session?.title || 'Walk',
           headerBackTitle: 'Done',
           headerRight: () => (
             <Pressable onPress={() => setShowShareSheet(true)} style={{ padding: 8, marginTop: 2 }}>
@@ -1629,7 +1634,7 @@ export default function WalkSummaryScreen() {
           ) : null}
 
           {/* AI title */}
-          {hasAI && session?.title != null && (
+          {hasAI && !!session?.title && (
             <EditableText
               value={session.title}
               onSave={handleUpdateTitle}

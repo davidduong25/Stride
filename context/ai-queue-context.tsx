@@ -605,11 +605,13 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
         if (active.type === 'transcribe') {
           updateRecording(active.recordingId, { transcript: '' });
           setTranscriptionKey(k => k + 1);
+        } else if (active.type === 'analyze') {
+          updateSession(active.recordingId, { title: '' });
         }
         dispatchRef.current({ type: 'NEXT' });
       }
     },
-    [updateRecording]
+    [updateRecording, updateSession]
   );
 
   const handleModelReady = useCallback((ready: boolean) => {
@@ -647,9 +649,10 @@ const handleAnalyzeDone = useCallback(
         return;
       }
       const { title, keyPoints, actions, summary } = parseAnalysisResponse(response);
+      const analysisEmpty = !title.trim() && keyPoints.length === 0 && !summary && actions.length === 0;
       try {
         await updateSession(sessionId, {
-          title:      title || null,
+          title:      title.trim() || (analysisEmpty ? '' : null),
           key_points: keyPoints.length > 0 ? JSON.stringify(keyPoints) : null,
           actions:    actions.length   > 0 ? JSON.stringify(actions)   : null,
           summary:    summary || null,

@@ -13,14 +13,16 @@
       "distribution": "internal",
       "channel": "preview",
       "env": {
-        "SENTRY_DISABLE_AUTO_UPLOAD": "true"
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
+        "EXPO_PUBLIC_SENTRY_DSN": "https://64dab4bd6c42118ea3e40db0724d7902@o4511312612491264.ingest.us.sentry.io/4511312614391808"
       }
     },
     "production": {
       "autoIncrement": true,
       "channel": "production",
       "env": {
-        "SENTRY_DISABLE_AUTO_UPLOAD": "true"
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
+        "EXPO_PUBLIC_SENTRY_DSN": "https://64dab4bd6c42118ea3e40db0724d7902@o4511312612491264.ingest.us.sentry.io/4511312614391808"
       }
     }
   },
