@@ -2,7 +2,7 @@
 
 ## Current Version
 
-`1.0.1` — baseline. Bump `version` in `app.json` with every OTA push or EAS build, then log it below.
+`1.0.2` — baseline. Bump `version` in `app.json` with every OTA push or EAS build, then log it below.
 
 ## Edit Log
 
@@ -10,6 +10,7 @@
 |---------|------|--------|
 | 1.0.0 | 2026-05-02 | Baseline — crash-safe transcription, swipe-to-delete, sort/filter sheet |
 | 1.0.1 | 2026-05-02 | Fix summarize loop; enable Sentry in EAS builds |
+| 1.0.2 | 2026-05-02 | Switch LLM from QLORA to SPINQUANT; add 30s error timeout for stuck analyze worker |
 
 > **Convention:** After every set of edits that gets pushed (OTA or EAS), increment the version in `app.json` and add a row here. Keep entries short — one line per version.
 
@@ -83,9 +84,16 @@ These are areas where subtle invariants make casual edits risky — read the rel
 - **Schema migrations** (`hooks/use-recordings.ts`, `hooks/use-sessions.ts`): Use the existing try/catch `ALTER TABLE` pattern. Never recreate tables or drop columns.
 - **`eas update` command**: Always `--channel preview --platform ios`. Omitting `--platform ios` bundles web, which fails because `react-native-executorch` has no CommonJS build.
 
-## Known Bugs
+## Open Issues
 
-Once a bug is fixed, remove it from this list. Don't leave stale entries.
+Once resolved, remove the entry. Don't leave stale entries. Add new issues here as soon as they're found — include file:line if it's a code bug, or a plain description for deployment/operational issues.
 
-- **`ai-queue-context.tsx:685`** — `enqueueAnalysis` puts `sessionId` into the `recordingId` field of the analyze job object (both fields are set, so no crash, but the naming mismatch could cause a logic bug if `recordingId` is ever read expecting a real recording ID).
-- **`use-audio-recording.ts:158`** — `(documentDirectory ?? '') + filename` falls back to a bare filename if `documentDirectory` is null, producing a non-absolute path that would silently save the file to the wrong location.
+### Deployment
+- **OTA updates need new build** — switched `runtimeVersion` from `appVersion` to `fingerprint` policy. Requires one `eas build --profile preview --platform ios` to bake in the new policy; after that, JS-only OTA updates will land on device.
+
+### Code Bugs
+- **`ai-queue-context.tsx:700`** — `enqueueAnalysis` puts `sessionId` into the `recordingId` field of the analyze job (both fields set to same value; no crash, but logic bug if `recordingId` is ever read expecting a real recording ID).
+- **`use-audio-recording.ts:158`** — `(documentDirectory ?? '') + filename` falls back to a bare filename when `documentDirectory` is null, producing a non-absolute path that silently saves to the wrong location.
+
+### AI / Models
+- **HuggingFace model download silent failure** (`ai-queue-context.tsx` `AnalyzeWorker`) — `react-native-executorch`'s `useLLM` swallows download errors in an unawaited async IIFE, so `error` state is never set on download failure. Partial workaround in place (30s timeout fires `onError` if `downloadProgress` stays 0), but mid-download stalls still hang silently.

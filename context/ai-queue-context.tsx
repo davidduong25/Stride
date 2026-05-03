@@ -14,7 +14,7 @@ import {
   MOONSHINE_TINY_ENCODER,
   MOONSHINE_TINY_DECODER,
   MOONSHINE_TOKENIZER,
-  LLAMA3_2_1B_QLORA,
+  LLAMA3_2_1B_SPINQUANT,
   LLAMA3_2_1B_TOKENIZER,
   LLAMA3_2_TOKENIZER_CONFIG,
 } from 'react-native-executorch';
@@ -489,8 +489,8 @@ function AnalyzeWorker({
   onDone: (sessionId: string, response: string, walkType: WalkType) => void;
   onError: (err: string) => void;
 }) {
-  const { generate, isReady, isGenerating, response, error } = useLLM({
-    modelSource: LLAMA3_2_1B_QLORA,
+  const { generate, isReady, isGenerating, response, error, downloadProgress } = useLLM({
+    modelSource: LLAMA3_2_1B_SPINQUANT,
     tokenizerSource: LLAMA3_2_1B_TOKENIZER,
     tokenizerConfigSource: LLAMA3_2_TOKENIZER_CONFIG,
   });
@@ -500,6 +500,18 @@ function AnalyzeWorker({
   const calledDoneRef    = useRef(false);
   const responseRef      = useRef('');
   responseRef.current    = response ?? '';
+
+  // useLLM swallows load errors in an unawaited async IIFE, so error state is never set.
+  // If downloadProgress stays 0 for 30s and isReady is still false, the download failed.
+  useEffect(() => {
+    if (isReady || downloadProgress > 0) return;
+    const timer = setTimeout(() => {
+      if (!isReady && !startedRef.current) {
+        onError('LLM model download failed — check network connection');
+      }
+    }, 30_000);
+    return () => clearTimeout(timer);
+  }, [isReady, downloadProgress, onError]);
 
   function callDoneOnce(id: string, res: string) {
     if (calledDoneRef.current) return;
