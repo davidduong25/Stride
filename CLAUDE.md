@@ -2,7 +2,7 @@
 
 ## Current Version
 
-`1.0.2` — baseline. Bump `version` in `app.json` with every OTA push or EAS build, then log it below.
+`1.0.3` — baseline. Bump `version` in `app.json` with every OTA push or EAS build, then log it below.
 
 ## Edit Log
 
@@ -11,6 +11,7 @@
 | 1.0.0 | 2026-05-02 | Baseline — crash-safe transcription, swipe-to-delete, sort/filter sheet |
 | 1.0.1 | 2026-05-02 | Fix summarize loop; enable Sentry in EAS builds |
 | 1.0.2 | 2026-05-02 | Switch LLM from QLORA to SPINQUANT; add 30s error timeout for stuck analyze worker |
+| 1.0.3 | 2026-05-03 | Self-host LLM model files on GitHub Releases; switch runtimeVersion to fingerprint |
 
 > **Convention:** After every set of edits that gets pushed (OTA or EAS), increment the version in `app.json` and add a row here. Keep entries short — one line per version.
 
@@ -96,4 +97,4 @@ Once resolved, remove the entry. Don't leave stale entries. Add new issues here 
 - **`use-audio-recording.ts:158`** — `(documentDirectory ?? '') + filename` falls back to a bare filename when `documentDirectory` is null, producing a non-absolute path that silently saves to the wrong location.
 
 ### AI / Models
-- **HuggingFace model download silent failure** (`ai-queue-context.tsx` `AnalyzeWorker`) — `react-native-executorch`'s `useLLM` swallows download errors in an unawaited async IIFE, so `error` state is never set on download failure. Partial workaround in place (30s timeout fires `onError` if `downloadProgress` stays 0), but mid-download stalls still hang silently.
+- **LLM mid-download stalls hang silently** (`ai-queue-context.tsx` `AnalyzeWorker`) — model files now self-hosted on GitHub Releases (`models-v1` tag). 30s timeout catches failed starts (downloadProgress stays 0), but stalls mid-download still hang with no user feedback. `useLLM` swallows these errors internally.

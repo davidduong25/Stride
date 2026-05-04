@@ -14,10 +14,12 @@ import {
   MOONSHINE_TINY_ENCODER,
   MOONSHINE_TINY_DECODER,
   MOONSHINE_TOKENIZER,
-  LLAMA3_2_1B_SPINQUANT,
-  LLAMA3_2_1B_TOKENIZER,
-  LLAMA3_2_TOKENIZER_CONFIG,
 } from 'react-native-executorch';
+
+const GITHUB_MODELS = 'https://github.com/davidduong25/Stride/releases/download/models-v1';
+const LLM_MODEL_SOURCE        = `${GITHUB_MODELS}/llama3_2_spinquant.pte`;
+const LLM_TOKENIZER_SOURCE    = `${GITHUB_MODELS}/tokenizer.json`;
+const LLM_TOKENIZER_CONFIG    = `${GITHUB_MODELS}/tokenizer_config.json`;
 
 import { useRecordingsContext } from './recordings-context';
 import { useSessionsContext } from './sessions-context';
@@ -490,9 +492,9 @@ function AnalyzeWorker({
   onError: (err: string) => void;
 }) {
   const { generate, isReady, isGenerating, response, error, downloadProgress } = useLLM({
-    modelSource: LLAMA3_2_1B_SPINQUANT,
-    tokenizerSource: LLAMA3_2_1B_TOKENIZER,
-    tokenizerConfigSource: LLAMA3_2_TOKENIZER_CONFIG,
+    modelSource: LLM_MODEL_SOURCE,
+    tokenizerSource: LLM_TOKENIZER_SOURCE,
+    tokenizerConfigSource: LLM_TOKENIZER_CONFIG,
   });
   const startedRef       = useRef(false);
   const wasGeneratingRef = useRef(false);
