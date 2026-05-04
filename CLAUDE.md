@@ -87,14 +87,4 @@ These are areas where subtle invariants make casual edits risky — read the rel
 
 ## Open Issues
 
-Once resolved, remove the entry. Don't leave stale entries. Add new issues here as soon as they're found — include file:line if it's a code bug, or a plain description for deployment/operational issues.
-
-### Deployment
-- **OTA updates need new build** — switched `runtimeVersion` from `appVersion` to `fingerprint` policy. Requires one `eas build --profile preview --platform ios` to bake in the new policy; after that, JS-only OTA updates will land on device.
-
-### Code Bugs
-- **`ai-queue-context.tsx:700`** — `enqueueAnalysis` puts `sessionId` into the `recordingId` field of the analyze job (both fields set to same value; no crash, but logic bug if `recordingId` is ever read expecting a real recording ID).
-- **`use-audio-recording.ts:158`** — `(documentDirectory ?? '') + filename` falls back to a bare filename when `documentDirectory` is null, producing a non-absolute path that silently saves to the wrong location.
-
-### AI / Models
-- **LLM mid-download stalls hang silently** (`ai-queue-context.tsx` `AnalyzeWorker`) — model files now self-hosted on GitHub Releases (`models-v1` tag). 30s timeout catches failed starts (downloadProgress stays 0), but stalls mid-download still hang with no user feedback. `useLLM` swallows these errors internally.
+Tracked in `ISSUES.md` — read that file at the start of every session. Add issues there immediately when found, remove them when fixed.
