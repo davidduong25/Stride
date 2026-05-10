@@ -2,7 +2,7 @@
   "expo": {
     "name": "Stride",
     "slug": "stride",
-    "version": "1.0.3",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "stride",
@@ -79,7 +79,14 @@
       ],
       "@sentry/react-native",
       "expo-web-browser",
-      "expo-asset"
+      "expo-asset",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Stride uses the microphone to record your journal entries.",
+          "speechRecognitionPermission": "Stride transcribes your recordings on-device to generate summaries."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

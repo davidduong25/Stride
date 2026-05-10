@@ -9,17 +9,19 @@ import React, {
   type PropsWithChildren,
 } from 'react';
 import {
-  useSpeechToText,
   useLLM,
-  MOONSHINE_TINY_ENCODER,
-  MOONSHINE_TINY_DECODER,
-  MOONSHINE_TOKENIZER,
+  QWEN2_5_0_5B_QUANTIZED,
+  QWEN2_5_TOKENIZER,
+  QWEN2_5_TOKENIZER_CONFIG,
 } from 'react-native-executorch';
+import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from 'expo-speech-recognition';
 
-const GITHUB_MODELS = 'https://github.com/davidduong25/Stride/releases/download/models-v1';
-const LLM_MODEL_SOURCE        = `${GITHUB_MODELS}/llama3_2_spinquant.pte`;
-const LLM_TOKENIZER_SOURCE    = `${GITHUB_MODELS}/tokenizer.json`;
-const LLM_TOKENIZER_CONFIG    = `${GITHUB_MODELS}/tokenizer_config.json`;
+const LLM_MODEL_SOURCE     = QWEN2_5_0_5B_QUANTIZED;
+const LLM_TOKENIZER_SOURCE = QWEN2_5_TOKENIZER;
+const LLM_TOKENIZER_CONFIG = QWEN2_5_TOKENIZER_CONFIG;
 
 import { useRecordingsContext } from './recordings-context';
 import { useSessionsContext } from './sessions-context';
@@ -35,7 +37,8 @@ export type AIJob         = TranscribeJob | AnalyzeJob;
 type QueueState = { active: AIJob | null; pending: AIJob[] };
 type QueueAction =
   | { type: 'PUSH'; job: AIJob }
-  | { type: 'NEXT'; insertFront?: AIJob };
+  | { type: 'NEXT'; insertFront?: AIJob }
+  | { type: 'RESET' };
 
 function queueReducer(state: QueueState, action: QueueAction): QueueState {
   switch (action.type) {
@@ -47,6 +50,8 @@ function queueReducer(state: QueueState, action: QueueAction): QueueState {
       const [next, ...rest] = [...front, ...state.pending];
       return { active: next ?? null, pending: rest };
     }
+    case 'RESET':
+      return { active: null, pending: [] };
   }
 }
 
@@ -89,10 +94,9 @@ const WALK_TYPE_KEYWORDS: Record<WalkType, string[]> = {
     'thought about', 'thinking of', 'could be', 'might work', 'creative',
   ],
   plan: [
-    'need to', 'have to', 'going to', 'schedule', 'deadline',
-    'task', 'next step', 'plan', 'planning', 'todo',
-    'tomorrow', 'this week', 'goal', 'goals', 'reminder', 'appointment',
-    'project', 'milestone', 'priority', 'action item',
+    'schedule', 'deadline', 'task', 'next step', 'plan', 'planning',
+    'todo', 'appointment', 'milestone', 'priority', 'action item',
+    'agenda', 'follow up', 'check in', 'due date', 'set a reminder',
   ],
   reflect: [
     'realized', 'realize', 'learned', 'learning', 'feeling', 'felt',
@@ -205,181 +209,9 @@ function parseAnalysisResponse(response: string): AnalysisResult {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Audio decoder — reads a saved audio file and returns a PCM float32 array
-// ---------------------------------------------------------------------------
-
-// Yield to the JS event loop so the UI stays responsive during heavy decoding.
-// Checks every DECODE_CHECK_INTERVAL samples; yields only if 8+ ms have elapsed.
-const DECODE_CHECK_INTERVAL = 4096;
-function yieldToUI(): Promise<void> { return new Promise(resolve => setImmediate(resolve)); }
-
-async function extractInt16PCM(view: DataView, start: number, end: number): Promise<number[]> {
-  const pcm: number[] = [];
-  let lastYield = Date.now();
-  for (let i = start; i + 1 < end; i += 2) {
-    pcm.push(view.getInt16(i, true) / 32768);
-    if (pcm.length % DECODE_CHECK_INTERVAL === 0) {
-      const now = Date.now();
-      if (now - lastYield >= 8) { lastYield = now; await yieldToUI(); }
-    }
-  }
-  return pcm;
-}
-
-async function extractFloat32PCM(view: DataView, start: number, end: number): Promise<number[]> {
-  const pcm: number[] = [];
-  let lastYield = Date.now();
-  for (let i = start; i + 3 < end; i += 4) {
-    pcm.push(view.getFloat32(i, true));
-    if (pcm.length % DECODE_CHECK_INTERVAL === 0) {
-      const now = Date.now();
-      if (now - lastYield >= 8) { lastYield = now; await yieldToUI(); }
-    }
-  }
-  return pcm;
-}
-
-async function stereoToMono(stereo: number[]): Promise<number[]> {
-  const mono: number[] = [];
-  let lastYield = Date.now();
-  for (let i = 0; i + 1 < stereo.length; i += 2) {
-    mono.push((stereo[i] + stereo[i + 1]) / 2);
-    if (mono.length % DECODE_CHECK_INTERVAL === 0) {
-      const now = Date.now();
-      if (now - lastYield >= 8) { lastYield = now; await yieldToUI(); }
-    }
-  }
-  return mono;
-}
-
-async function resampleTo16k(pcm: number[], fromRate: number): Promise<number[]> {
-  if (fromRate === 16000) return pcm;
-  const ratio = fromRate / 16000;
-  const outLen = Math.floor(pcm.length / ratio);
-  const out = new Array<number>(outLen);
-  let lastYield = Date.now();
-  for (let i = 0; i < outLen; i++) {
-    const pos = i * ratio;
-    const lo = Math.floor(pos);
-    const hi = Math.min(lo + 1, pcm.length - 1);
-    out[i] = pcm[lo] + (pcm[hi] - pcm[lo]) * (pos - lo);
-    if (i % DECODE_CHECK_INTERVAL === 0 && i > 0) {
-      const now = Date.now();
-      if (now - lastYield >= 8) { lastYield = now; await yieldToUI(); }
-    }
-  }
-  return out;
-}
-
-async function decodeAudioToPCM(uri: string): Promise<number[]> {
-  const res = await fetch(uri);
-  const ab = await res.arrayBuffer();
-  if (ab.byteLength <= 4096) {
-    throw new Error(`Audio file too small: ${ab.byteLength} bytes at ${uri}`);
-  }
-  const raw = new Uint8Array(ab);
-  const buffer = raw.buffer;
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
-
-  if (bytes.length < 8) throw new Error(`File too small: ${bytes.length} bytes`);
-  const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
-
-  if (magic === 'RIFF') {
-    if (bytes.length < 12) throw new Error('WAV file truncated');
-    let offset = 12;
-    let dataOffset = -1, dataSize = 0;
-    let audioFormat = 1, numChannels = 1, sampleRate = 16000, bitsPerSample = 16;
-
-    while (offset + 8 <= bytes.length) {
-      const id = String.fromCharCode(bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]);
-      const size = view.getUint32(offset + 4, true);
-      if (id === 'fmt ' && size >= 16) {
-        audioFormat   = view.getUint16(offset + 8,  true);
-        numChannels   = view.getUint16(offset + 10, true);
-        sampleRate    = view.getUint32(offset + 12, true);
-        bitsPerSample = view.getUint16(offset + 22, true);
-      }
-      if (id === 'data') { dataOffset = offset + 8; dataSize = size; break; }
-      offset += 8 + size + (size % 2);
-    }
-    if (dataOffset === -1) throw new Error('No data chunk in WAV');
-
-    const end = Math.min(dataOffset + dataSize, bytes.length);
-    let pcm: number[];
-
-    if (audioFormat === 3 || bitsPerSample === 32) {
-      const floatSamples = await extractFloat32PCM(view, dataOffset, end);
-      pcm = numChannels === 2 ? await stereoToMono(floatSamples) : floatSamples;
-    } else {
-      const raw = await extractInt16PCM(view, dataOffset, end);
-      pcm = numChannels === 2 ? await stereoToMono(raw) : raw;
-    }
-    return await resampleTo16k(pcm, sampleRate);
-  }
-
-  if (magic === 'caff') {
-    let offset = 8;
-    const log: string[] = [];
-    let cafSampleRate = 16000;
-    let cafChannels = 1;
-    let cafBitsPerChannel = 16;
-    let cafIsFloat = false;
-
-    while (offset + 12 <= bytes.length) {
-      const id = String.fromCharCode(bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]);
-      const sizeHigh = view.getInt32(offset + 4, false);
-      const sizeLow  = view.getUint32(offset + 8, false);
-      const streaming = sizeHigh < 0;
-      const size = streaming ? 0 : (sizeHigh * 0x100000000 + sizeLow);
-      log.push(`${id}(${streaming ? 'stream' : size})`);
-
-      if (id === 'desc' && size >= 32) {
-        cafSampleRate     = view.getFloat64(offset + 12, false);
-        const formatFlags = view.getUint32(offset + 24, false);
-        cafIsFloat        = (formatFlags & 0x1) !== 0;
-        cafChannels       = view.getUint32(offset + 36, false);
-        cafBitsPerChannel = view.getUint32(offset + 40, false);
-      }
-
-      if (id === 'data') {
-        const dataStart = offset + 12 + 4;
-        const dataEnd = streaming ? bytes.length : Math.min(offset + 12 + size, bytes.length);
-        let pcm: number[];
-        if (cafIsFloat || cafBitsPerChannel === 32) {
-          const floatSamples = await extractFloat32PCM(view, dataStart, dataEnd);
-          pcm = cafChannels === 2 ? await stereoToMono(floatSamples) : floatSamples;
-        } else {
-          const raw = await extractInt16PCM(view, dataStart, dataEnd);
-          pcm = cafChannels === 2 ? await stereoToMono(raw) : raw;
-        }
-        if (pcm.length === 0) throw new Error(`CAF data empty: start=${dataStart} end=${dataEnd} file=${bytes.length} chunks=[${log.join(',')}]`);
-        return await resampleTo16k(pcm, cafSampleRate);
-      }
-      if (streaming) break;
-      offset += 12 + size;
-    }
-    throw new Error(`No CAF data chunk: file=${bytes.length}b chunks=[${log.join(',')}]`);
-  }
-
-  if (magic === 'ftyp') {
-    try {
-      const { AudioContext } = require('react-native-audio-api');
-      const ctx: { decodeAudioData: (b: ArrayBuffer) => Promise<{ sampleRate: number; getChannelData: (c: number) => Float32Array }> }
-        = new AudioContext();
-      const audioBuffer = await ctx.decodeAudioData(bytes.buffer);
-      const channelData = audioBuffer.getChannelData(0);
-      return await resampleTo16k(Array.from(channelData), audioBuffer.sampleRate);
-    } catch {
-      throw new Error('Android m4a transcription requires react-native-audio-api — run: npx expo install react-native-audio-api, then rebuild via EAS.');
-    }
-  }
-  throw new Error(`Unsupported audio format: "${magic}"`);
-}
 
 // ---------------------------------------------------------------------------
-// Worker components — each mounts exactly one ExecuTorch hook
+// Worker components
 // ---------------------------------------------------------------------------
 
 class AIWorkerErrorBoundary extends React.Component<
@@ -401,82 +233,75 @@ function TranscriptionWorker({
   onProgress,
   onReady,
   onError,
+  onLiveSequence,
 }: {
   job: TranscribeJob | null;
   onDone: (recordingId: string, transcript: string) => void;
   onProgress: (progress: number) => void;
   onReady: (ready: boolean) => void;
   onError: (err: string) => void;
+  onLiveSequence: (text: string) => void;
 }) {
-  const { transcribe, isReady, isGenerating, sequence, downloadProgress, error } = useSpeechToText({
-    modelName: 'moonshine',
-    encoderSource: MOONSHINE_TINY_ENCODER,
-    decoderSource: MOONSHINE_TINY_DECODER,
-    tokenizerSource: MOONSHINE_TOKENIZER,
-  });
-  const pendingIdRef    = useRef<string | null>(null);
-  const wasGeneratingRef = useRef(false);
-  const calledErrorRef  = useRef(false);
-  const sequenceRef     = useRef('');
-  sequenceRef.current   = sequence;
+  const pendingIdRef       = useRef<string | null>(null);
+  const finalTranscriptRef = useRef('');
+  const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
-    onProgress(downloadProgress);
-  }, [downloadProgress, onProgress]);
+    ExpoSpeechRecognitionModule.requestPermissionsAsync().then(({ granted }) => {
+      if (granted) {
+        setIsReady(true);
+        onProgress(1);
+        onReady(true);
+      } else {
+        onError('Speech recognition permission denied — enable it in Settings → Privacy → Speech Recognition');
+      }
+    });
+    return () => {
+      onReady(false);
+      ExpoSpeechRecognitionModule.abort();
+    };
+  }, []);
 
-  useEffect(() => {
-    onReady(isReady);
-  }, [isReady, onReady]);
-
-  useEffect(() => {
-    if (error && !calledErrorRef.current) {
-      calledErrorRef.current = true;
-      pendingIdRef.current = null;
-      wasGeneratingRef.current = false;
-      onError(error.message ?? String(error));
+  useSpeechRecognitionEvent('result', (event) => {
+    const text = event.results[0]?.transcript ?? '';
+    if (event.isFinal) {
+      finalTranscriptRef.current = text;
+    } else if (text) {
+      onLiveSequence(text);
     }
-  }, [error, onError]);
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    const id = pendingIdRef.current;
+    if (!id) return;
+    pendingIdRef.current = null;
+    onDone(id, finalTranscriptRef.current);
+  });
+
+  useSpeechRecognitionEvent('error', (event) => {
+    const id = pendingIdRef.current;
+    if (!id) return;
+    pendingIdRef.current = null;
+    if (event.error === 'no-speech') {
+      onDone(id, '');
+    } else {
+      onError(event.message || event.error || 'Speech recognition failed');
+    }
+  });
 
   useEffect(() => {
     if (!isReady || !job || pendingIdRef.current === job.recordingId) return;
     pendingIdRef.current = job.recordingId;
-    calledErrorRef.current = false;
-    const id = job.recordingId;
-    (async () => {
-      try {
-        const pcm = await decodeAudioToPCM(job.uri);
-        if (pcm.length === 0) {
-          pendingIdRef.current = null;
-          onError('WAV decode produced empty PCM — check file at: ' + job.uri);
-          return;
-        }
-        if (pcm.length < 3200) {
-          pendingIdRef.current = null;
-          onDone(id, '');
-          return;
-        }
-        const peak = pcm.reduce((m, s) => Math.max(m, Math.abs(s)), 0);
-        if (peak > 0.01) {
-          for (let i = 0; i < pcm.length; i++) pcm[i] /= peak;
-        }
-        transcribe(pcm);
-      } catch (e) {
-        pendingIdRef.current = null;
-        wasGeneratingRef.current = false;
-        onError(e instanceof Error ? e.message : String(e));
-      }
-    })();
-  }, [isReady, job, transcribe, onDone, onError]);
-
-  useEffect(() => {
-    if (isGenerating) { wasGeneratingRef.current = true; return; }
-    if (wasGeneratingRef.current && pendingIdRef.current) {
-      const id = pendingIdRef.current;
-      pendingIdRef.current = null;
-      wasGeneratingRef.current = false;
-      onDone(id, sequenceRef.current);
-    }
-  }, [isGenerating, onDone]);
+    finalTranscriptRef.current = '';
+    ExpoSpeechRecognitionModule.start({
+      lang: 'en-US',
+      interimResults: true,
+      continuous: false,
+      requiresOnDeviceRecognition: true,
+      addsPunctuation: true,
+      audioSource: { uri: job.uri },
+    });
+  }, [isReady, job]);
 
   return null;
 }
@@ -486,12 +311,16 @@ function AnalyzeWorker({
   job,
   onDone,
   onError,
+  onProgress,
+  onReady,
 }: {
-  job: AnalyzeJob;
+  job: AnalyzeJob | null;
   onDone: (sessionId: string, response: string, walkType: WalkType) => void;
   onError: (err: string) => void;
+  onProgress: (p: number) => void;
+  onReady: (ready: boolean) => void;
 }) {
-  const { generate, isReady, isGenerating, response, error, downloadProgress } = useLLM({
+  const { generate, interrupt, isReady, isGenerating, response, error, downloadProgress } = useLLM({
     modelSource: LLM_MODEL_SOURCE,
     tokenizerSource: LLM_TOKENIZER_SOURCE,
     tokenizerConfigSource: LLM_TOKENIZER_CONFIG,
@@ -500,29 +329,63 @@ function AnalyzeWorker({
   const wasGeneratingRef = useRef(false);
   const pendingIdRef     = useRef<string | null>(null);
   const calledDoneRef    = useRef(false);
+  const currentJobIdRef  = useRef<string | null>(null);
+  const walkTypeRef      = useRef<WalkType | null>(null);
   const responseRef      = useRef('');
   responseRef.current    = response ?? '';
 
-  // useLLM swallows load errors in an unawaited async IIFE, so error state is never set.
-  // If downloadProgress stays 0 for 30s and isReady is still false, the download failed.
+  // Reset per-job refs when a new job arrives — worker stays mounted across jobs.
   useEffect(() => {
-    if (isReady || downloadProgress > 0) return;
+    const newId = job?.sessionId ?? null;
+    if (newId === currentJobIdRef.current) return;
+    currentJobIdRef.current = newId;
+    if (newId !== null) {
+      startedRef.current = false;
+      calledDoneRef.current = false;
+      wasGeneratingRef.current = false;
+      pendingIdRef.current = null;
+    }
+  }, [job?.sessionId]);
+
+  // 3-min load timeout — only fires when there's an actual job, not during preload.
+  useEffect(() => {
+    if (!job) return;
     const timer = setTimeout(() => {
-      if (!isReady && !startedRef.current) {
-        onError('LLM model download failed — check network connection');
+      if (!startedRef.current) {
+        onError('LLM model failed to load — reset AI queue and try again');
       }
-    }, 30_000);
+    }, 3 * 60_000);
     return () => clearTimeout(timer);
-  }, [isReady, downloadProgress, onError]);
+  }, [job?.sessionId, onError]);
+
+  useEffect(() => {
+    onProgress(downloadProgress);
+  }, [downloadProgress, onProgress]);
+
+  useEffect(() => {
+    onReady(isReady);
+  }, [isReady, onReady]);
+
+  // Interrupt native generation if the job is cancelled while generating.
+  useEffect(() => {
+    if (!job && isGenerating) interrupt();
+  }, [job, isGenerating, interrupt]);
+
+  // If generation runs for 90s without completing, interrupt the native model.
+  useEffect(() => {
+    if (!isGenerating) return;
+    const timer = setTimeout(() => interrupt(), 90_000);
+    return () => clearTimeout(timer);
+  }, [isGenerating, interrupt]);
 
   function callDoneOnce(id: string, res: string) {
     if (calledDoneRef.current) return;
     calledDoneRef.current = true;
-    onDone(id, res, job.walkType);
+    onDone(id, res, walkTypeRef.current!);
   }
 
   useEffect(() => {
-    if (!isReady || startedRef.current) return;
+    if (!isReady || !job || startedRef.current) return;
     const systemPrompt = ANALYZE_PROMPTS[job.walkType];
     if (!systemPrompt) {
       onError(`Unknown walk type: ${job.walkType}`);
@@ -530,19 +393,19 @@ function AnalyzeWorker({
     }
     startedRef.current = true;
     pendingIdRef.current = job.sessionId;
+    walkTypeRef.current = job.walkType;
     const userMessage = job.transcripts
       .map((t, i) => `[${i + 1}]: ${t}`)
       .join('\n');
-    try {
-      generate([
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: `Analyze these voice notes:\n\n${userMessage}` },
-      ]);
-    } catch (e) {
+    generate([
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: `Analyze these voice notes:\n\n${userMessage}` },
+    ]).catch(e => {
       pendingIdRef.current = null;
       startedRef.current = false;
+      wasGeneratingRef.current = false;
       onError(e instanceof Error ? e.message : String(e));
-    }
+    });
   }, [isReady, generate, job, onError]);
 
   useEffect(() => {
@@ -556,9 +419,10 @@ function AnalyzeWorker({
   }, [isGenerating, onDone]);
 
   useEffect(() => {
-    if (!error) return;
-    callDoneOnce(job.sessionId, '');
-  }, [error, job.sessionId]);
+    if (!error || !startedRef.current || !job) return;
+    startedRef.current = false;
+    onError(error.message ?? 'LLM generation failed');
+  }, [error, job?.sessionId, onError]);
 
   return null;
 }
@@ -571,6 +435,7 @@ type AIQueueCtx = {
   enqueueTranscription: (recordingId: string, uri: string) => void;
   enqueueAnalysis: (sessionId: string, transcripts: string[], walkType: WalkType) => void;
   cancelAnalysis: (sessionId: string) => void;
+  resetQueue: () => void;
   processingId: string | null;
   processingType: 'transcribe' | 'analyze' | null;
   modelDownloadProgress: number;
@@ -579,6 +444,9 @@ type AIQueueCtx = {
   failedIds: ReadonlySet<string>;
   queuedIds: ReadonlySet<string>;
   analyzingSessionId: string | null;
+  liveTranscript: string;
+  llmDownloadProgress: number;
+  isLLMReady: boolean;
 };
 
 const AIQueueContext = createContext<AIQueueCtx | null>(null);
@@ -592,35 +460,45 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   const [modelError, setModelError]                       = useState<string | null>(null);
   const [failedIds, setFailedIds]                         = useState<Set<string>>(new Set());
   const [transcriptionKey, setTranscriptionKey]           = useState(0);
+  const [liveTranscript, setLiveTranscript]               = useState('');
+  const [llmDownloadProgress, setLlmDownloadProgress]     = useState(0);
 
+  const [isLLMReady, setIsLLMReady]         = useState(false);
+  const [llmWorkerKey, setLlmWorkerKey]     = useState(0);
   const [analyzeWorkerReady, setAnalyzeWorkerReady] = useState(false);
+
+  const dispatchRef          = useRef(dispatch);
+  dispatchRef.current        = dispatch;
+  const cancelledAnalysisRef  = useRef<Set<string>>(new Set());
+  const forcedAdvancedRef     = useRef<Set<string>>(new Set());
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
+  const activeJobRef          = useRef<AIJob | null>(null);
+  activeJobRef.current        = queue.active;
+
+  // 1500ms delay before mounting AnalyzeWorker — lets TranscriptionWorker fully
+  // unmount and Apple STT abort() resolve before the LLM starts loading.
   useEffect(() => {
     if (queue.active?.type !== 'analyze') { setAnalyzeWorkerReady(false); return; }
     const t = setTimeout(() => setAnalyzeWorkerReady(true), 1500);
     return () => clearTimeout(t);
   }, [queue.active?.type]);
 
-  const dispatchRef          = useRef(dispatch);
-  dispatchRef.current        = dispatch;
-  const cancelledAnalysisRef  = useRef<Set<string>>(new Set());
-  const moonshineEverReadyRef = useRef(false);
-  const mountedRef            = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
-  const activeJobRef          = useRef<AIJob | null>(null);
-  activeJobRef.current        = queue.active;
-
   const handleError = useCallback(
     (err: string) => {
       if (!mountedRef.current) return;
+      setLiveTranscript('');
       setModelError(err);
       const active = activeJobRef.current;
       if (active) {
-        setFailedIds(prev => new Set([...prev, active.recordingId]));
         if (active.type === 'transcribe') {
+          setFailedIds(prev => new Set([...prev, active.recordingId]));
           updateRecording(active.recordingId, { transcript: '' });
           setTranscriptionKey(k => k + 1);
         } else if (active.type === 'analyze') {
-          updateSession(active.recordingId, { title: '' });
+          updateSession(active.sessionId, { title: null });
+          setLlmWorkerKey(k => k + 1);
+          setIsLLMReady(false);
         }
         dispatchRef.current({ type: 'NEXT' });
       }
@@ -628,13 +506,10 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
     [updateRecording, updateSession]
   );
 
-  const handleModelReady = useCallback((ready: boolean) => {
-    if (ready) moonshineEverReadyRef.current = true;
-    setIsModelReady(moonshineEverReadyRef.current || ready);
-  }, []);
 
   const handleTranscriptionDone = useCallback(
     async (recordingId: string, transcript: string) => {
+      setLiveTranscript('');
       try {
         const walkType = transcript.trim() ? classifyTranscript(transcript) : null;
         await updateRecording(recordingId, {
@@ -659,14 +534,16 @@ const handleAnalyzeDone = useCallback(
       if (!mountedRef.current) return;
       if (cancelledAnalysisRef.current.has(sessionId)) {
         cancelledAnalysisRef.current.delete(sessionId);
-        dispatchRef.current({ type: 'NEXT' });
+        if (!forcedAdvancedRef.current.has(sessionId)) {
+          dispatchRef.current({ type: 'NEXT' });
+        }
+        forcedAdvancedRef.current.delete(sessionId);
         return;
       }
       const { title, keyPoints, actions, summary } = parseAnalysisResponse(response);
-      const analysisEmpty = !title.trim() && keyPoints.length === 0 && !summary && actions.length === 0;
       try {
         await updateSession(sessionId, {
-          title:      title.trim() || (analysisEmpty ? '' : null),
+          title:      title.trim() || null,
           key_points: keyPoints.length > 0 ? JSON.stringify(keyPoints) : null,
           actions:    actions.length   > 0 ? JSON.stringify(actions)   : null,
           summary:    summary || null,
@@ -704,6 +581,26 @@ const handleAnalyzeDone = useCallback(
 
   function cancelAnalysis(sessionId: string) {
     cancelledAnalysisRef.current.add(sessionId);
+    const active = activeJobRef.current;
+    if (active?.type === 'analyze' && active.sessionId === sessionId) {
+      forcedAdvancedRef.current.add(sessionId);
+      dispatchRef.current({ type: 'NEXT' });
+    }
+  }
+
+  function resetQueue() {
+    const active = activeJobRef.current;
+    if (active?.type === 'analyze') {
+      cancelledAnalysisRef.current.add(active.sessionId);
+      forcedAdvancedRef.current.add(active.sessionId);
+    }
+    dispatch({ type: 'RESET' });
+    setTranscriptionKey(k => k + 1);
+    setLlmWorkerKey(k => k + 1);
+    setIsLLMReady(false);
+    setFailedIds(new Set());
+    setModelError(null);
+    setLlmDownloadProgress(0);
   }
 
   const queuedIds = new Set(
@@ -716,6 +613,7 @@ const handleAnalyzeDone = useCallback(
     enqueueTranscription,
     enqueueAnalysis,
     cancelAnalysis,
+    resetQueue,
     processingId:         queue.active?.recordingId ?? null,
     processingType:       queue.active?.type ?? null,
     modelDownloadProgress,
@@ -724,6 +622,9 @@ const handleAnalyzeDone = useCallback(
     failedIds,
     queuedIds,
     analyzingSessionId: queue.active?.type === 'analyze' ? queue.active.sessionId : null,
+    liveTranscript,
+    llmDownloadProgress,
+    isLLMReady,
   };
 
   return (
@@ -735,17 +636,20 @@ const handleAnalyzeDone = useCallback(
             job={queue.active?.type === 'transcribe' ? queue.active : null}
             onDone={handleTranscriptionDone}
             onProgress={setModelDownloadProgress}
-            onReady={handleModelReady}
+            onReady={setIsModelReady}
             onError={handleError}
+            onLiveSequence={setLiveTranscript}
           />
         </AIWorkerErrorBoundary>
       )}
       {queue.active?.type === 'analyze' && analyzeWorkerReady && (
-        <AIWorkerErrorBoundary key={queue.active.sessionId} onError={handleError}>
+        <AIWorkerErrorBoundary key={llmWorkerKey} onError={handleError}>
           <AnalyzeWorker
-            job={queue.active}
+            job={queue.active as AnalyzeJob}
             onDone={handleAnalyzeDone}
             onError={handleError}
+            onProgress={setLlmDownloadProgress}
+            onReady={setIsLLMReady}
           />
         </AIWorkerErrorBoundary>
       )}
