@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
-  AppState,
   Pressable,
   SafeAreaView,
   StyleSheet,
@@ -109,8 +108,8 @@ export default function HomeScreen() {
           startRecording, stopRecording }      = useAudioRecording();
   const { addRecording, recordings }           = useRecordingsContext();
   const { sessions, addSession }               = useSessionsContext();
-  const { enqueueTranscription, processingType, modelDownloadProgress,
-          isModelReady, modelError }            = useAIQueue();
+  const { enqueueTranscription, processingType,
+          llmDownloadProgress, isLLMReady }     = useAIQueue();
   const { isSessionActive, startSession,
           addRecordingToSession, endSession }   = useWalkSession();
 
@@ -291,23 +290,6 @@ export default function HomeScreen() {
     }
   }, [pedometerState, testMode, startSession, endSession, stepCountRef, addSession, navigateToSummary]);
 
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', next => {
-      if (next === 'background') handleStopRecording();
-    });
-    return () => sub.remove();
-  }, [handleStopRecording]);
-
-  // ── Model loader overlay (first-launch download) ─────────────────────────
-
-  const [showModelLoader, setShowModelLoader] = useState(false);
-
-  useEffect(() => {
-    if (isModelReady) { setShowModelLoader(false); return; }
-    const t = setTimeout(() => { if (!isModelReady) setShowModelLoader(true); }, 600);
-    return () => clearTimeout(t);
-  }, [isModelReady]);
-
   // ── AI status label — hidden during active session (shown on walk-summary) ─
 
   const aiStatus = isSessionActive ? null
@@ -403,6 +385,27 @@ export default function HomeScreen() {
                 <Text style={styles.lastWalkLink}>view last walk →</Text>
               </Pressable>
             )}
+            {!isLLMReady && (processingType === 'analyze' || llmDownloadProgress > 0) && (
+              <View style={styles.modelBar}>
+                <View style={styles.modelBarTrack}>
+                  <View
+                    style={[
+                      styles.modelBarFill,
+                      llmDownloadProgress > 0
+                        ? { width: `${Math.round(llmDownloadProgress * 100)}%` }
+                        : { width: '8%' },
+                    ]}
+                  />
+                </View>
+                <Text style={styles.modelBarLabel}>
+                  {llmDownloadProgress >= 0.99
+                    ? 'loading AI model…'
+                    : llmDownloadProgress > 0
+                    ? `downloading AI · ${Math.round(llmDownloadProgress * 100)}%`
+                    : 'preparing AI models…'}
+                </Text>
+              </View>
+            )}
           </View>
 
         </>
@@ -463,40 +466,6 @@ export default function HomeScreen() {
         </>
       )}
 
-      {/* Model download overlay — first launch only */}
-      {showModelLoader && !isModelReady && (
-        <View style={styles.modelOverlay}>
-          <Text style={styles.modelOverlayWordmark}>stride</Text>
-
-          <View style={styles.modelOverlayBody}>
-            <Text style={styles.modelOverlayLabel}>
-              {modelError
-                ? 'AI setup failed'
-                : modelDownloadProgress > 0
-                ? 'downloading AI model'
-                : 'preparing AI'}
-            </Text>
-
-            {!modelError && (
-              <>
-                <View style={styles.modelProgressTrack}>
-                  <View
-                    style={[
-                      styles.modelProgressFill,
-                      { width: `${Math.round(Math.max(modelDownloadProgress, 0.02) * 100)}%` },
-                    ]}
-                  />
-                </View>
-                {modelDownloadProgress > 0 && (
-                  <Text style={styles.modelProgressPct}>
-                    {Math.round(modelDownloadProgress * 100)}%
-                  </Text>
-                )}
-              </>
-            )}
-          </View>
-        </View>
-      )}
     </SafeAreaView>
   );
 }
@@ -724,44 +693,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
 
-  // ── Model download overlay ────────────────────────────────────────────────
-  modelOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: C.background,
-    alignItems:      'center',
-    justifyContent:  'center',
-    gap:             48,
-    paddingHorizontal: 40,
-  },
-  modelOverlayWordmark: {
-    fontSize:      36,
-    fontWeight:    '700',
-    color:         C.text,
-    letterSpacing: -0.5,
-  },
-  modelOverlayBody: {
+  // ── AI model download bar ─────────────────────────────────────────────────
+  modelBar: {
     alignSelf: 'stretch',
-    gap:       12,
+    gap:       5,
+    marginTop: 16,
   },
-  modelOverlayLabel: {
-    fontSize:  13,
-    color:     C.textSecondary,
-    textAlign: 'center',
-  },
-  modelProgressTrack: {
-    height:          4,
+  modelBarTrack: {
+    height:          3,
     borderRadius:    2,
     backgroundColor: C.surfaceHigh,
     overflow:        'hidden',
   },
-  modelProgressFill: {
-    height:          4,
+  modelBarFill: {
+    height:          3,
     borderRadius:    2,
     backgroundColor: C.tint,
+    opacity:         0.6,
   },
-  modelProgressPct: {
-    fontSize:  12,
+  modelBarLabel: {
+    fontSize:  11,
     color:     C.textTertiary,
-    textAlign: 'right',
+    textAlign: 'center',
   },
 });

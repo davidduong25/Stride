@@ -2,7 +2,7 @@
 
 ## Current Version
 
-`1.0.3` — baseline. Bump `version` in `app.json` with every OTA push or EAS build, then log it below.
+`1.1.9` — last pushed version. Only bump `version` in `app.json` when doing an EAS build, not for OTA-only pushes.
 
 ## Edit Log
 
@@ -12,8 +12,24 @@
 | 1.0.1 | 2026-05-02 | Fix summarize loop; enable Sentry in EAS builds |
 | 1.0.2 | 2026-05-02 | Switch LLM from QLORA to SPINQUANT; add 30s error timeout for stuck analyze worker |
 | 1.0.3 | 2026-05-03 | Self-host LLM model files on GitHub Releases; switch runtimeVersion to fingerprint |
+| 1.0.4 | 2026-05-03 | Fix queue stuck on cancel+delete; add reset AI queue to Settings |
+| 1.0.5 | 2026-05-03 | Delete cascade on session swipe; plan keyword fix; live transcript streaming; high-pass audio filter; Notes-style transcript editing; paragraph detection |
+| 1.0.6 | 2026-05-03 | OTA pipeline test — version now reads from constants/version.ts |
+| 1.0.7 | 2026-05-03 | LLM progress feedback + 3-min load timeout replacing broken 30s download-only timeout |
+| 1.0.8 | 2026-05-03 | Fix summarize re-summarise loop: error effect now ignores pre-generation errors; handleError writes null title |
+| 1.0.9 | 2026-05-04 | Switch LLM to official HuggingFace URLs (was self-hosted GitHub); add Clear model cache to Settings |
+| 1.1.0 | 2026-05-04 | Revert LLM to QLORA (was SPINQUANT); eager background download with inline progress bar; remove blocking overlay |
+| 1.1.1 | 2026-05-04 | Fix summarize loop: route LLM runAsync error through onError instead of onDone; reset LLM worker on analyze failure |
+| 1.1.2 | 2026-05-04 | Switch LLM from Llama 3.2 1B QLORA to Qwen 2.5 0.5B quantized (~350MB vs ~1.1GB) |
+| 1.1.3 | 2026-05-05 | Fix runAsync crash: revert AnalyzeWorker to conditional mount (was always-mounted since 1.1.0, caused stale GPU resources after app backgrounding) |
+| 1.1.4 | 2026-05-07 | Enable background recording: remove AppState stop-on-background; UIBackgroundModes audio + staysActiveInBackground already declared |
+| 1.1.5 | 2026-05-07 | Fix runAsync crash: remove LLMPreloaderWorker, always-mount AnalyzeWorker, bump llmWorkerKey on foreground resume; tighten enqueueAnalysis gate to !isLLMReady |
+| 1.1.6 | 2026-05-07 | Fix runAsync root cause: restore 1500ms analyzeWorkerReady delay (dropped in 1.1.0), revert to conditional AnalyzeWorker mount, fix generate().catch() for unhandled rejections, remove isLLMReady gate from confirm card |
+| 1.1.7 | 2026-05-07 | Fix LLM model: revert from Qwen 2.5 0.5B (8da4w incompatible with A14/ExecuTorch 0.4.10) back to Llama 3.2 1B SPINQUANT |
+| 1.1.8 | 2026-05-08 | Switch LLM back to Qwen 2.5 0.5B: root cause of runAsync error is OOM (Moonshine unreleasable; 1.1GB Llama + Moonshine exceeds device limit; Qwen at 350MB fits comfortably) |
+| 1.1.9 | 2026-05-10 | Fix stuck "preparing AI models…" bar: only show when analyze job is active or LLM is downloading; fix Settings cache size label (~350MB not ~1.1GB) |
 
-> **Convention:** After every set of edits that gets pushed (OTA or EAS), increment the version in `app.json` and add a row here. Keep entries short — one line per version.
+> **Convention:** After every push (OTA or EAS), bump `APP_VERSION` in `constants/version.ts` and add a row here. Also bump `version` in `app.json` only for EAS builds. Keep entries short — one line per version.
 
 ## Project
 
@@ -22,12 +38,11 @@ Project root: `C:\Users\david\stride`. All source files live here — ignore the
 
 ## Hard Rules
 
-- **Version bumping is mandatory.** Whenever you make edits that David intends to push (OTA update or EAS build), you MUST:
-  1. Increment `version` in `app.json` — patch bump (e.g. `1.0.0` → `1.0.1`) for fixes/tweaks, minor bump (e.g. `1.0.x` → `1.1.0`) for new features.
-  2. Update the "Current Version" line at the top of this file.
-  3. Add a row to the Edit Log table with the new version, today's date, and a one-line description.
-- The version shown in Settings → About (`app/settings.tsx:31`) reads directly from `app.json` via `Constants.expoConfig?.version` — no other wiring needed.
-- Never skip the version bump even if the change feels small. David uses the version number to verify OTA updates landed on the device.
+- **Version bumping rules (fingerprint runtimeVersion policy):**
+  - **Every push (OTA or EAS build):** bump `APP_VERSION` in `constants/version.ts` — this is what Settings displays and what David uses to verify updates landed on device.
+  - **EAS build only:** also bump `version` in `app.json` (patch for fixes, minor for features). This controls the fingerprint hash and the App Store build number. Do NOT bump `app.json` for OTA-only pushes — it shifts the fingerprint and the update silently skips every installed device.
+  - Update the "Current Version" line at the top of this file and add a row to the Edit Log on every push.
+  - To verify an OTA landed: Settings → About will show the new `APP_VERSION`.
 
 ## Architecture
 

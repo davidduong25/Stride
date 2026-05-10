@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Constants from 'expo-constants';
+import { APP_VERSION } from '@/constants/version';
 import {
   documentDirectory,
   copyAsync,
@@ -21,14 +21,17 @@ import {
   getInfoAsync,
 } from 'expo-file-system/legacy';
 
+const RNE_DIRECTORY = `${documentDirectory ?? ''}react-native-executorch/`;
+
 import { C } from '@/constants/theme';
 import { useRecordingsContext } from '@/context/recordings-context';
 import { useSessionsContext } from '@/context/sessions-context';
+import { useAIQueue } from '@/context/ai-queue-context';
 import { useNotifications } from '@/hooks/use-notifications';
 import { buildMarkdownExport } from '@/lib/export';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 
-const version = Constants.expoConfig?.version ?? '1.0.0';
+const version = APP_VERSION;
 const PRIVACY_POLICY_URL = 'https://davidduong25.github.io/Stride/privacy.html';
 
 const BACKUP_TS_KEY = 'stride.lastBackupTs';
@@ -149,6 +152,7 @@ export default function SettingsScreen() {
   const router = useRouter();
   const { recordings, clearAllRecordings } = useRecordingsContext();
   const { sessions, clearAllSessions }     = useSessionsContext();
+  const { resetQueue }                     = useAIQueue();
 
   const [testMode, setTestMode]       = useState(false);
   const [lastBackup, setLastBackup]   = useState<number | null>(null);
@@ -173,6 +177,39 @@ export default function SettingsScreen() {
   }
 
   // ── Handlers ──────────────────────────────────────────────────────────────
+
+  function confirmClearModelCache() {
+    Alert.alert(
+      'Clear model cache?',
+      'Deletes downloaded AI model files (~350 MB). They will re-download on next use.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear cache',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteAsync(RNE_DIRECTORY, { idempotent: true });
+              Alert.alert('Cache cleared', 'AI models will re-download on next use.');
+            } catch {
+              Alert.alert('Failed', 'Could not clear model cache. Try again.');
+            }
+          },
+        },
+      ]
+    );
+  }
+
+  function confirmResetQueue() {
+    Alert.alert(
+      'Reset AI queue?',
+      'Cancels any stuck transcription or summary jobs. Your recorded audio and existing transcripts are not affected.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Reset', style: 'destructive', onPress: resetQueue },
+      ]
+    );
+  }
 
   function confirmClearWalks() {
     Alert.alert(
@@ -294,6 +331,18 @@ export default function SettingsScreen() {
         {/* Data */}
         <SectionHeader label="DATA" />
         <SettingsGroup>
+          <SettingsRow
+            label="Reset AI queue"
+            destructive
+            onPress={confirmResetQueue}
+          />
+          <RowDivider />
+          <SettingsRow
+            label="Clear model cache"
+            destructive
+            onPress={confirmClearModelCache}
+          />
+          <RowDivider />
           <SettingsRow
             label="Export journal"
             chevron
