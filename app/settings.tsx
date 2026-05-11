@@ -181,7 +181,7 @@ export default function SettingsScreen() {
   function confirmClearModelCache() {
     Alert.alert(
       'Clear model cache?',
-      'Deletes downloaded AI model files (~350 MB). They will re-download on next use.',
+      'Deletes downloaded AI model files (~1 GB). They will re-download on next use.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
