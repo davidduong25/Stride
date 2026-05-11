@@ -61,10 +61,21 @@ function parseJsonArray(json: string | null): string[] {
   }
 }
 
+function addParagraphs(text: string): string {
+  const sentences = text.match(/[^.!?]+[.!?]*(?:\s+|$)/g);
+  if (!sentences || sentences.length < 4) return text;
+  const paragraphs: string[] = [];
+  for (let i = 0; i < sentences.length; i += 3) {
+    paragraphs.push(sentences.slice(i, i + 3).join('').trim());
+  }
+  return paragraphs.join('\n\n');
+}
+
 function normaliseTranscript(text: string): string {
   const t = text.trim();
   if (!t) return t;
-  return t.charAt(0).toUpperCase() + t.slice(1);
+  const capitalised = t.charAt(0).toUpperCase() + t.slice(1);
+  return addParagraphs(capitalised);
 }
 
 function dominantWalkType(tags: (string | null)[]): WalkType | null {
@@ -445,28 +456,20 @@ function ClipRow({
   isActive,
   positionMs,
   durationMs,
-  isTranscribing,
-  isQueued,
-  isFailed,
   onPlay,
   onSeek,
-  onRetranscribe,
   onSave,
   onDelete,
 }: {
-  item:            RecordingEntry;
-  index:           number;
-  isActive:        boolean;
-  positionMs:      number;
-  durationMs:      number;
-  isTranscribing:  boolean;
-  isQueued:        boolean;
-  isFailed:        boolean;
-  onPlay:          (id: string) => void;
-  onSeek:          (ms: number) => void;
-  onRetranscribe:  (id: string) => void;
-  onSave:          (id: string, text: string) => void;
-  onDelete:        (id: string) => void;
+  item:       RecordingEntry;
+  index:      number;
+  isActive:   boolean;
+  positionMs: number;
+  durationMs: number;
+  onPlay:     (id: string) => void;
+  onSeek:     (ms: number) => void;
+  onSave:     (id: string, text: string) => void;
+  onDelete:   (id: string) => void;
 }) {
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [editing, setEditing]               = useState(false);
@@ -528,7 +531,7 @@ function ClipRow({
         />
       )}
 
-      {(hasTranscript || isTranscribing || isQueued || isFailed) && (
+      {hasTranscript && (
         <Pressable
           style={clipStyles.transcriptToggle}
           onPress={() => !editing && setTranscriptOpen(o => !o)}
@@ -538,21 +541,7 @@ function ClipRow({
             size={11}
             color={C.textTertiary}
           />
-          <Text style={clipStyles.transcriptToggleText}>
-            {isTranscribing ? 'Transcribing…'
-              : isQueued     ? 'Queued…'
-              : isFailed     ? 'Failed'
-              : 'Transcript'}
-          </Text>
-          {isFailed && (
-            <Pressable
-              onPress={() => onRetranscribe(item.id)}
-              hitSlop={8}
-              style={clipStyles.retryBtn}
-            >
-              <Text style={clipStyles.retryText}>Retry</Text>
-            </Pressable>
-          )}
+          <Text style={clipStyles.transcriptToggleText}>Transcript</Text>
         </Pressable>
       )}
 
@@ -564,9 +553,6 @@ function ClipRow({
           <View style={clipStyles.transcriptActions}>
             <Pressable onPress={startEditing} hitSlop={6}>
               <Text style={clipStyles.transcriptAction}>Edit</Text>
-            </Pressable>
-            <Pressable onPress={() => onRetranscribe(item.id)} hitSlop={6}>
-              <Text style={clipStyles.transcriptAction}>Retranscribe</Text>
             </Pressable>
           </View>
         </View>
@@ -581,6 +567,7 @@ function ClipRow({
             multiline
             autoFocus
             scrollEnabled={false}
+            blurOnSubmit={false}
           />
           <View style={clipStyles.transcriptActions}>
             <Pressable onPress={commitEdit} hitSlop={6}>
@@ -664,16 +651,20 @@ const clipStyles = StyleSheet.create({
     lineHeight: 21,
   },
   transcriptInput: {
-    fontSize:          14,
-    color:             C.text,
-    lineHeight:        21,
-    borderWidth:       1,
-    borderColor:       C.border,
-    borderRadius:      8,
-    padding:           10,
-    minHeight:         80,
-    textAlignVertical: 'top',
-    backgroundColor:   C.surfaceHigh,
+    fontSize:            14,
+    color:               C.text,
+    lineHeight:          21,
+    textAlignVertical:   'top',
+    paddingVertical:     4,
+    borderBottomWidth:   StyleSheet.hairlineWidth,
+    borderBottomColor:   C.tint,
+  },
+  liveText: {
+    marginTop:  8,
+    fontSize:   13,
+    color:      C.textTertiary,
+    lineHeight: 19,
+    fontStyle:  'italic',
   },
   transcriptActions: {
     flexDirection: 'row',
@@ -1241,14 +1232,10 @@ export default function WalkSummaryScreen() {
   const { recordings, updateRecording, deleteRecording } = useRecordingsContext();
   const { sessions, updateSession }                       = useSessionsContext();
   const {
-    enqueueTranscription,
     enqueueAnalysis,
     cancelAnalysis,
-    processingId,
-    processingType,
-    failedIds,
-    queuedIds,
     analyzingSessionId,
+    llmDownloadProgress,
   } = useAIQueue();
 
   const startedAt    = Number(startedAtStr ?? 0);
@@ -1276,15 +1263,7 @@ export default function WalkSummaryScreen() {
 
   const allTranscribed =
     sessionRecordings.length > 0 &&
-    sessionRecordings.every(
-      r => r.transcript !== null &&
-           !queuedIds.has(r.id) &&
-           !(processingId === r.id && processingType === 'transcribe')
-    );
-
-  const transcribedCount = sessionRecordings.filter(
-    r => r.transcript !== null && !queuedIds.has(r.id) && processingId !== r.id
-  ).length;
+    sessionRecordings.every(r => r.transcript !== null);
 
   const totalWordCount = sessionRecordings.reduce((sum, r) => {
     const words = r.transcript?.trim().split(/\s+/).filter(Boolean) ?? [];
@@ -1475,29 +1454,6 @@ export default function WalkSummaryScreen() {
     await updateRecording(id, { transcript: text, transcript_edited: 1 });
   }
 
-  async function handleRetranscribe(id: string) {
-    const entry = sessionRecordings.find(r => r.id === id);
-    if (!entry) return;
-
-    async function doRetranscribe() {
-      await updateRecording(id, { transcript: null, transcript_edited: 0 });
-      enqueueTranscription(id, entry!.uri);
-    }
-
-    if (entry.transcript_edited) {
-      Alert.alert(
-        'Replace your edits?',
-        'Retranscribing will overwrite the changes you made to this transcript.',
-        [
-          { text: 'Cancel',       style: 'cancel' },
-          { text: 'Retranscribe', style: 'destructive', onPress: doRetranscribe },
-        ]
-      );
-      return;
-    }
-    await doRetranscribe();
-  }
-
   async function handleDelete(id: string) {
     Alert.alert(
       'Delete clip?',
@@ -1671,33 +1627,18 @@ export default function WalkSummaryScreen() {
             </View>
           )}
 
-          {!isAnalyzing && !hasAI && !allTranscribed && sessionRecordings.length > 0 && (
-            <View style={styles.processingCard}>
-              <View style={styles.processingRow}>
-                <Text style={styles.processingText}>Transcribing your thoughts</Text>
-                <Text style={styles.processingCount}>
-                  {transcribedCount} of {sessionRecordings.length}
-                </Text>
-              </View>
-              <View style={styles.progressTrack}>
-                <View
-                  style={[
-                    styles.progressFill,
-                    { width: `${Math.round((transcribedCount / sessionRecordings.length) * 100)}%` },
-                  ]}
-                />
-              </View>
-            </View>
-          )}
-
           {(isAnalyzing || cancelling) && (
             <View style={styles.processingCard}>
               <View style={styles.processingRow}>
                 <IconSymbol name="sparkles" size={13} color={C.tint} />
                 <Text style={styles.processingText}>
-                  {cancelling ? 'Cancelling…' : (walkType
+                  {cancelling
+                    ? 'Cancelling…'
+                    : (llmDownloadProgress > 0 && llmDownloadProgress < 0.99)
+                    ? `Downloading AI model ${Math.round(llmDownloadProgress * 100)}%…`
+                    : walkType
                     ? `Generating ${WALK_TYPE_LABELS[walkType]} summary…`
-                    : 'Generating your summary…')}
+                    : 'Generating your summary…'}
                 </Text>
                 {!cancelling && (
                   <Pressable
@@ -1709,7 +1650,14 @@ export default function WalkSummaryScreen() {
                 )}
               </View>
               <View style={styles.progressTrack}>
-                <View style={[styles.progressFill, { width: '100%', opacity: 0.5 }]} />
+                <View
+                  style={[
+                    styles.progressFill,
+                    (llmDownloadProgress > 0 && llmDownloadProgress < 0.99)
+                      ? { width: `${Math.round(llmDownloadProgress * 100)}%` }
+                      : { width: '100%', opacity: 0.5 },
+                  ]}
+                />
               </View>
             </View>
           )}
@@ -1871,12 +1819,8 @@ export default function WalkSummaryScreen() {
                     isActive={playingId === item.id}
                     positionMs={positionMs}
                     durationMs={durationMsState}
-                    isTranscribing={processingId === item.id && processingType === 'transcribe'}
-                    isQueued={queuedIds.has(item.id)}
-                    isFailed={failedIds.has(item.id)}
                     onPlay={handlePlay}
                     onSeek={handleSeek}
-                    onRetranscribe={handleRetranscribe}
                     onSave={handleSave}
                     onDelete={handleDelete}
                   />

@@ -2,7 +2,7 @@
 
 ## Current Version
 
-`1.2.0` — last pushed version. Only bump `version` in `app.json` when doing an EAS build, not for OTA-only pushes.
+`1.2.1` — last pushed version. Only bump `version` in `app.json` when doing an EAS build, not for OTA-only pushes.
 
 ## Edit Log
 
@@ -29,6 +29,7 @@
 | 1.1.8 | 2026-05-08 | Switch LLM back to Qwen 2.5 0.5B: root cause of runAsync error is OOM (Moonshine unreleasable; 1.1GB Llama + Moonshine exceeds device limit; Qwen at 350MB fits comfortably) |
 | 1.1.9 | 2026-05-10 | Fix stuck "preparing AI models…" bar: only show when analyze job is active or LLM is downloading; fix Settings cache size label (~350MB not ~1.1GB) |
 | 1.2.0 | 2026-05-10 | Replace Moonshine STT with Apple on-device speech recognition (expo-speech-recognition): removes ExecuTorch GPU context contention that caused runAsync crashes; eliminates ~100MB model download; removes WAV/CAF PCM decoding code |
+| 1.2.1 | 2026-05-11 | Real-time transcription: STT runs live during recording (continuous mic, not file-based); transcript saved on stop; live 5-word fade display during recording; remove post-recording transcription queue |
 
 > **Convention:** After every push (OTA or EAS), bump `APP_VERSION` in `constants/version.ts` and add a row here. Also bump `version` in `app.json` only for EAS builds. Keep entries short — one line per version.
 

@@ -10,6 +10,10 @@ import {
 import { useRouter, useFocusEffect } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
+import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from 'expo-speech-recognition';
 
 import * as Sentry from '@sentry/react-native';
 
@@ -18,7 +22,7 @@ import { useAudioRecording } from '@/hooks/use-audio-recording';
 import { usePedometer, type PedometerState } from '@/hooks/use-pedometer';
 import { useRecordingsContext } from '@/context/recordings-context';
 import { useSessionsContext } from '@/context/sessions-context';
-import { useAIQueue } from '@/context/ai-queue-context';
+import { useAIQueue, classifyTranscript } from '@/context/ai-queue-context';
 import { useWalkSession, type WalkSessionSnapshot } from '@/context/walk-session-context';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { EllipsisMenu } from '@/components/EllipsisMenu';
@@ -60,6 +64,12 @@ function computeStreak(sessionStartTimes: number[]): number {
   while (days.has(cursor)) { streak++; cursor -= DAY_MS; }
   return streak;
 }
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const WORD_OPACITIES = [0.2, 0.35, 0.55, 0.75, 1.0];
 
 // ---------------------------------------------------------------------------
 // LiveWaveform — simple amplitude bars for the recording screen
@@ -108,18 +118,60 @@ export default function HomeScreen() {
           startRecording, stopRecording }      = useAudioRecording();
   const { addRecording, recordings }           = useRecordingsContext();
   const { sessions, addSession }               = useSessionsContext();
-  const { enqueueTranscription, processingType,
+  const { processingType,
           llmDownloadProgress, isLLMReady }     = useAIQueue();
   const { isSessionActive, startSession,
           addRecordingToSession, endSession }   = useWalkSession();
 
-  const [testMode, setTestMode] = useState(false);
+  const [testMode, setTestMode]     = useState(false);
+  const [liveWords, setLiveWords]   = useState<string[]>([]);
+
+  // Real-time STT state
+  const accumulatedTranscriptRef = useRef('');
+  const sttEndResolveRef         = useRef<(() => void) | null>(null);
+  const sttEndPromiseRef         = useRef<Promise<void>>(Promise.resolve());
+  const sttActiveRef             = useRef(false);
 
   useFocusEffect(useCallback(() => {
     AsyncStorage.getItem('momentum.testMode').then(val => {
       setTestMode(val === 'true');
     });
   }, []));
+
+  // Pre-warm speech recognition permissions
+  useEffect(() => {
+    ExpoSpeechRecognitionModule.requestPermissionsAsync();
+  }, []);
+
+  // ── Real-time STT event handlers ─────────────────────────────────────────
+
+  useSpeechRecognitionEvent('result', (event) => {
+    const text = event.results[0]?.transcript ?? '';
+    if (event.isFinal) {
+      if (text.trim()) {
+        accumulatedTranscriptRef.current = accumulatedTranscriptRef.current
+          ? accumulatedTranscriptRef.current + ' ' + text
+          : text;
+      }
+      setLiveWords([]);
+    } else if (text.trim()) {
+      setLiveWords(text.trim().split(/\s+/).filter(Boolean).slice(-5));
+    }
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    sttActiveRef.current = false;
+    sttEndResolveRef.current?.();
+    sttEndResolveRef.current = null;
+    setLiveWords([]);
+  });
+
+  useSpeechRecognitionEvent('error', () => {
+    sttActiveRef.current = false;
+    sttEndResolveRef.current?.();
+    sttEndResolveRef.current = null;
+    setLiveWords([]);
+  });
 
   const isSessionActiveRef = useRef(isSessionActive);
   isSessionActiveRef.current = isSessionActive;
@@ -207,8 +259,21 @@ export default function HomeScreen() {
     if (isStoppingRef.current) return;
     isStoppingRef.current = true;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+    if (sttActiveRef.current) {
+      ExpoSpeechRecognitionModule.stop();
+      // Safety: resolve after 3s if the end event never fires
+      const safetyResolve = sttEndResolveRef.current;
+      setTimeout(() => safetyResolve?.(), 3000);
+    } else {
+      sttEndResolveRef.current?.();
+      sttEndResolveRef.current = null;
+    }
+
     const savePromise = (async () => {
       try {
+        await sttEndPromiseRef.current;
+        const transcript = accumulatedTranscriptRef.current;
         const result = await stopRecording(stepCountRef.current);
         isStoppingRef.current = false;
         if (!result) return;
@@ -217,20 +282,22 @@ export default function HomeScreen() {
           id = await addRecording({
             uri: result.uri, filename: result.filename,
             duration: result.duration, waveform: result.waveform,
-            steps: result.steps, transcript: null,
-            tags: null, transcript_edited: null,
+            steps: result.steps,
+            transcript: transcript || '',
+            tags: transcript.trim() ? classifyTranscript(transcript) : null,
+            transcript_edited: null,
           });
         } catch {
           Alert.alert('Save failed', 'Could not save the recording. Please try again.');
           return;
         }
-        if (id) { addRecordingToSession(id); enqueueTranscription(id, result.uri); }
+        if (id) addRecordingToSession(id);
       } catch {
         isStoppingRef.current = false;
       }
     })();
     pendingSaveRef.current = savePromise;
-  }, [stopRecording, stepCountRef, addRecording, addRecordingToSession, enqueueTranscription]);
+  }, [stopRecording, stepCountRef, addRecording, addRecordingToSession]);
 
   const handleEndSession = useCallback(async () => {
     try {
@@ -293,8 +360,7 @@ export default function HomeScreen() {
   // ── AI status label — hidden during active session (shown on walk-summary) ─
 
   const aiStatus = isSessionActive ? null
-    : processingType === 'transcribe' ? 'Transcribing…'
-    : processingType === 'analyze'    ? 'Analyzing…'
+    : processingType === 'analyze' ? 'Analyzing…'
     : null;
 
   // ── Grace period label ───────────────────────────────────────────────────
@@ -375,6 +441,18 @@ export default function HomeScreen() {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
                   if (!isSessionActive) beginSession(stepCountRef.current);
                   startRecording();
+                  accumulatedTranscriptRef.current = '';
+                  sttEndPromiseRef.current = new Promise<void>(resolve => {
+                    sttEndResolveRef.current = resolve;
+                  });
+                  sttActiveRef.current = true;
+                  ExpoSpeechRecognitionModule.start({
+                    lang: 'en-US',
+                    interimResults: true,
+                    continuous: true,
+                    requiresOnDeviceRecognition: true,
+                    addsPunctuation: true,
+                  });
                 }}
               >
                 <Text style={styles.recordButtonText}>record</Text>
@@ -442,6 +520,18 @@ export default function HomeScreen() {
           {/* Live waveform */}
           <View style={styles.waveformContainer}>
             <LiveWaveform samples={liveWaveform} color={ringColor} />
+          </View>
+
+          {/* Live transcript words */}
+          <View style={styles.liveWordsContainer}>
+            {liveWords.map((word, i) => (
+              <Text
+                key={`${i}-${word}`}
+                style={[styles.liveWord, { opacity: WORD_OPACITIES[i + (5 - liveWords.length)] }]}
+              >
+                {word}
+              </Text>
+            ))}
           </View>
 
           {/* Controls */}
@@ -655,7 +745,23 @@ const styles = StyleSheet.create({
   waveformContainer: {
     alignItems:    'center',
     marginTop:     20,
-    marginBottom:  12,
+    marginBottom:  8,
+  },
+  liveWordsContainer: {
+    flexDirection:  'row',
+    alignItems:     'center',
+    justifyContent: 'center',
+    flexWrap:       'wrap',
+    gap:             6,
+    paddingHorizontal: 24,
+    minHeight:      28,
+    marginBottom:   4,
+  },
+  liveWord: {
+    fontSize:      17,
+    color:         C.text,
+    fontWeight:    '500',
+    letterSpacing: 0.2,
   },
   controls: {
     paddingHorizontal: 24,

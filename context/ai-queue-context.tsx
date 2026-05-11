@@ -14,25 +14,19 @@ import {
   QWEN2_5_TOKENIZER,
   QWEN2_5_TOKENIZER_CONFIG,
 } from 'react-native-executorch';
-import {
-  ExpoSpeechRecognitionModule,
-  useSpeechRecognitionEvent,
-} from 'expo-speech-recognition';
 
 const LLM_MODEL_SOURCE     = QWEN2_5_0_5B_QUANTIZED;
 const LLM_TOKENIZER_SOURCE = QWEN2_5_TOKENIZER;
 const LLM_TOKENIZER_CONFIG = QWEN2_5_TOKENIZER_CONFIG;
 
-import { useRecordingsContext } from './recordings-context';
 import { useSessionsContext } from './sessions-context';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type TranscribeJob = { type: 'transcribe'; recordingId: string; uri: string };
-export type AnalyzeJob    = { type: 'analyze'; recordingId: string; sessionId: string; transcripts: string[]; walkType: WalkType };
-export type AIJob         = TranscribeJob | AnalyzeJob;
+export type AnalyzeJob = { type: 'analyze'; recordingId: string; sessionId: string; transcripts: string[]; walkType: WalkType };
+export type AIJob      = AnalyzeJob;
 
 type QueueState = { active: AIJob | null; pending: AIJob[] };
 type QueueAction =
@@ -118,7 +112,7 @@ const WALK_TYPE_KEYWORDS: Record<WalkType, string[]> = {
   ],
 };
 
-function classifyTranscript(transcript: string): WalkType | null {
+export function classifyTranscript(transcript: string): WalkType | null {
   const text = transcript.toLowerCase();
   const scores: Record<WalkType, number> = {
     vent: 0, brainstorm: 0, plan: 0, reflect: 0, appreciate: 0, untangle: 0,
@@ -209,7 +203,6 @@ function parseAnalysisResponse(response: string): AnalysisResult {
   }
 }
 
-
 // ---------------------------------------------------------------------------
 // Worker components
 // ---------------------------------------------------------------------------
@@ -226,86 +219,6 @@ class AIWorkerErrorBoundary extends React.Component<
   componentDidCatch(error: Error) { this.props.onError(error.message); }
   render() { return this.state.hasError ? null : this.props.children; }
 }
-
-function TranscriptionWorker({
-  job,
-  onDone,
-  onProgress,
-  onReady,
-  onError,
-  onLiveSequence,
-}: {
-  job: TranscribeJob | null;
-  onDone: (recordingId: string, transcript: string) => void;
-  onProgress: (progress: number) => void;
-  onReady: (ready: boolean) => void;
-  onError: (err: string) => void;
-  onLiveSequence: (text: string) => void;
-}) {
-  const pendingIdRef       = useRef<string | null>(null);
-  const finalTranscriptRef = useRef('');
-  const [isReady, setIsReady] = useState(false);
-
-  useEffect(() => {
-    ExpoSpeechRecognitionModule.requestPermissionsAsync().then(({ granted }) => {
-      if (granted) {
-        setIsReady(true);
-        onProgress(1);
-        onReady(true);
-      } else {
-        onError('Speech recognition permission denied — enable it in Settings → Privacy → Speech Recognition');
-      }
-    });
-    return () => {
-      onReady(false);
-      ExpoSpeechRecognitionModule.abort();
-    };
-  }, []);
-
-  useSpeechRecognitionEvent('result', (event) => {
-    const text = event.results[0]?.transcript ?? '';
-    if (event.isFinal) {
-      finalTranscriptRef.current = text;
-    } else if (text) {
-      onLiveSequence(text);
-    }
-  });
-
-  useSpeechRecognitionEvent('end', () => {
-    const id = pendingIdRef.current;
-    if (!id) return;
-    pendingIdRef.current = null;
-    onDone(id, finalTranscriptRef.current);
-  });
-
-  useSpeechRecognitionEvent('error', (event) => {
-    const id = pendingIdRef.current;
-    if (!id) return;
-    pendingIdRef.current = null;
-    if (event.error === 'no-speech') {
-      onDone(id, '');
-    } else {
-      onError(event.message || event.error || 'Speech recognition failed');
-    }
-  });
-
-  useEffect(() => {
-    if (!isReady || !job || pendingIdRef.current === job.recordingId) return;
-    pendingIdRef.current = job.recordingId;
-    finalTranscriptRef.current = '';
-    ExpoSpeechRecognitionModule.start({
-      lang: 'en-US',
-      interimResults: true,
-      continuous: false,
-      requiresOnDeviceRecognition: true,
-      addsPunctuation: true,
-      audioSource: { uri: job.uri },
-    });
-  }, [isReady, job]);
-
-  return null;
-}
-
 
 function AnalyzeWorker({
   job,
@@ -334,7 +247,6 @@ function AnalyzeWorker({
   const responseRef      = useRef('');
   responseRef.current    = response ?? '';
 
-  // Reset per-job refs when a new job arrives — worker stays mounted across jobs.
   useEffect(() => {
     const newId = job?.sessionId ?? null;
     if (newId === currentJobIdRef.current) return;
@@ -347,7 +259,6 @@ function AnalyzeWorker({
     }
   }, [job?.sessionId]);
 
-  // 3-min load timeout — only fires when there's an actual job, not during preload.
   useEffect(() => {
     if (!job) return;
     const timer = setTimeout(() => {
@@ -366,12 +277,10 @@ function AnalyzeWorker({
     onReady(isReady);
   }, [isReady, onReady]);
 
-  // Interrupt native generation if the job is cancelled while generating.
   useEffect(() => {
     if (!job && isGenerating) interrupt();
   }, [job, isGenerating, interrupt]);
 
-  // If generation runs for 90s without completing, interrupt the native model.
   useEffect(() => {
     if (!isGenerating) return;
     const timer = setTimeout(() => interrupt(), 90_000);
@@ -432,19 +341,13 @@ function AnalyzeWorker({
 // ---------------------------------------------------------------------------
 
 type AIQueueCtx = {
-  enqueueTranscription: (recordingId: string, uri: string) => void;
   enqueueAnalysis: (sessionId: string, transcripts: string[], walkType: WalkType) => void;
   cancelAnalysis: (sessionId: string) => void;
   resetQueue: () => void;
   processingId: string | null;
-  processingType: 'transcribe' | 'analyze' | null;
-  modelDownloadProgress: number;
-  isModelReady: boolean;
+  processingType: 'analyze' | null;
   modelError: string | null;
-  failedIds: ReadonlySet<string>;
-  queuedIds: ReadonlySet<string>;
   analyzingSessionId: string | null;
-  liveTranscript: string;
   llmDownloadProgress: number;
   isLLMReady: boolean;
 };
@@ -452,32 +355,25 @@ type AIQueueCtx = {
 const AIQueueContext = createContext<AIQueueCtx | null>(null);
 
 export function AIQueueProvider({ children }: PropsWithChildren) {
-  const { updateRecording }        = useRecordingsContext();
-  const { updateSession }          = useSessionsContext();
-  const [queue, dispatch]          = useReducer(queueReducer, { active: null, pending: [] });
-  const [modelDownloadProgress, setModelDownloadProgress] = useState(0);
-  const [isModelReady, setIsModelReady]                   = useState(false);
-  const [modelError, setModelError]                       = useState<string | null>(null);
-  const [failedIds, setFailedIds]                         = useState<Set<string>>(new Set());
-  const [transcriptionKey, setTranscriptionKey]           = useState(0);
-  const [liveTranscript, setLiveTranscript]               = useState('');
-  const [llmDownloadProgress, setLlmDownloadProgress]     = useState(0);
+  const { updateSession }      = useSessionsContext();
+  const [queue, dispatch]      = useReducer(queueReducer, { active: null, pending: [] });
+  const [modelError, setModelError]                   = useState<string | null>(null);
+  const [llmDownloadProgress, setLlmDownloadProgress] = useState(0);
+  const [isLLMReady, setIsLLMReady]                   = useState(false);
+  const [llmWorkerKey, setLlmWorkerKey]               = useState(0);
+  const [analyzeWorkerReady, setAnalyzeWorkerReady]   = useState(false);
 
-  const [isLLMReady, setIsLLMReady]         = useState(false);
-  const [llmWorkerKey, setLlmWorkerKey]     = useState(0);
-  const [analyzeWorkerReady, setAnalyzeWorkerReady] = useState(false);
-
-  const dispatchRef          = useRef(dispatch);
-  dispatchRef.current        = dispatch;
+  const dispatchRef           = useRef(dispatch);
+  dispatchRef.current         = dispatch;
   const cancelledAnalysisRef  = useRef<Set<string>>(new Set());
   const forcedAdvancedRef     = useRef<Set<string>>(new Set());
-  const mountedRef = useRef(true);
+  const mountedRef            = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
   const activeJobRef          = useRef<AIJob | null>(null);
   activeJobRef.current        = queue.active;
 
-  // 1500ms delay before mounting AnalyzeWorker — lets TranscriptionWorker fully
-  // unmount and Apple STT abort() resolve before the LLM starts loading.
+  // 1500ms delay before mounting AnalyzeWorker — safety buffer letting any
+  // in-flight real-time STT session fully release before LLM starts loading.
   useEffect(() => {
     if (queue.active?.type !== 'analyze') { setAnalyzeWorkerReady(false); return; }
     const t = setTimeout(() => setAnalyzeWorkerReady(true), 1500);
@@ -487,49 +383,19 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   const handleError = useCallback(
     (err: string) => {
       if (!mountedRef.current) return;
-      setLiveTranscript('');
       setModelError(err);
       const active = activeJobRef.current;
-      if (active) {
-        if (active.type === 'transcribe') {
-          setFailedIds(prev => new Set([...prev, active.recordingId]));
-          updateRecording(active.recordingId, { transcript: '' });
-          setTranscriptionKey(k => k + 1);
-        } else if (active.type === 'analyze') {
-          updateSession(active.sessionId, { title: null });
-          setLlmWorkerKey(k => k + 1);
-          setIsLLMReady(false);
-        }
+      if (active?.type === 'analyze') {
+        updateSession(active.sessionId, { title: null });
+        setLlmWorkerKey(k => k + 1);
+        setIsLLMReady(false);
         dispatchRef.current({ type: 'NEXT' });
       }
     },
-    [updateRecording, updateSession]
+    [updateSession]
   );
 
-
-  const handleTranscriptionDone = useCallback(
-    async (recordingId: string, transcript: string) => {
-      setLiveTranscript('');
-      try {
-        const walkType = transcript.trim() ? classifyTranscript(transcript) : null;
-        await updateRecording(recordingId, {
-          transcript: transcript || '',
-          transcript_edited: 0,
-          ...(walkType ? { tags: walkType } : {}),
-        });
-        if (!mountedRef.current) return;
-        setFailedIds(prev => { const n = new Set(prev); n.delete(recordingId); return n; });
-      } catch {
-        if (!mountedRef.current) return;
-        setFailedIds(prev => new Set([...prev, recordingId]));
-      } finally {
-        if (mountedRef.current) dispatchRef.current({ type: 'NEXT' });
-      }
-    },
-    [updateRecording]
-  );
-
-const handleAnalyzeDone = useCallback(
+  const handleAnalyzeDone = useCallback(
     async (sessionId: string, response: string, walkType: WalkType) => {
       if (!mountedRef.current) return;
       if (cancelledAnalysisRef.current.has(sessionId)) {
@@ -567,14 +433,6 @@ const handleAnalyzeDone = useCallback(
     [updateSession]
   );
 
-  function enqueueTranscription(recordingId: string, uri: string) {
-    const alreadyActive = queue.active?.type === 'transcribe' && queue.active.recordingId === recordingId;
-    const alreadyPending = queue.pending.some(j => j.type === 'transcribe' && j.recordingId === recordingId);
-    if (alreadyActive || alreadyPending) return;
-    setFailedIds(prev => { const n = new Set(prev); n.delete(recordingId); return n; });
-    dispatch({ type: 'PUSH', job: { type: 'transcribe', recordingId, uri } });
-  }
-
   function enqueueAnalysis(sessionId: string, transcripts: string[], walkType: WalkType) {
     dispatch({ type: 'PUSH', job: { type: 'analyze', recordingId: sessionId, sessionId, transcripts, walkType } });
   }
@@ -595,34 +453,20 @@ const handleAnalyzeDone = useCallback(
       forcedAdvancedRef.current.add(active.sessionId);
     }
     dispatch({ type: 'RESET' });
-    setTranscriptionKey(k => k + 1);
     setLlmWorkerKey(k => k + 1);
     setIsLLMReady(false);
-    setFailedIds(new Set());
     setModelError(null);
     setLlmDownloadProgress(0);
   }
 
-  const queuedIds = new Set(
-    queue.pending
-      .filter((j): j is TranscribeJob => j.type === 'transcribe')
-      .map(j => j.recordingId)
-  );
-
   const value: AIQueueCtx = {
-    enqueueTranscription,
     enqueueAnalysis,
     cancelAnalysis,
     resetQueue,
-    processingId:         queue.active?.recordingId ?? null,
-    processingType:       queue.active?.type ?? null,
-    modelDownloadProgress,
-    isModelReady,
+    processingId:       queue.active?.recordingId ?? null,
+    processingType:     queue.active?.type ?? null,
     modelError,
-    failedIds,
-    queuedIds,
     analyzingSessionId: queue.active?.type === 'analyze' ? queue.active.sessionId : null,
-    liveTranscript,
     llmDownloadProgress,
     isLLMReady,
   };
@@ -630,18 +474,6 @@ const handleAnalyzeDone = useCallback(
   return (
     <AIQueueContext.Provider value={value}>
       {children}
-      {queue.active?.type !== 'analyze' && (
-        <AIWorkerErrorBoundary key={transcriptionKey} onError={handleError}>
-          <TranscriptionWorker
-            job={queue.active?.type === 'transcribe' ? queue.active : null}
-            onDone={handleTranscriptionDone}
-            onProgress={setModelDownloadProgress}
-            onReady={setIsModelReady}
-            onError={handleError}
-            onLiveSequence={setLiveTranscript}
-          />
-        </AIWorkerErrorBoundary>
-      )}
       {queue.active?.type === 'analyze' && analyzeWorkerReady && (
         <AIWorkerErrorBoundary key={llmWorkerKey} onError={handleError}>
           <AnalyzeWorker
