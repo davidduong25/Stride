@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import {
   Dimensions,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -13,7 +14,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { C } from '@/constants/theme';
 import { IconSymbol } from '@/components/ui/icon-symbol';
-import { VALID_WALK_TYPES, WALK_TYPE_LABELS, WALK_TYPE_DESCRIPTIONS } from '@/context/ai-queue-context';
+import { VALID_WALK_TYPES, WALK_TYPE_LABELS, WALK_TYPE_DESCRIPTIONS, WalkType } from '@/context/ai-queue-context';
 
 const { width: W } = Dimensions.get('window');
 
@@ -46,20 +47,120 @@ const SLIDES = [
 
 const TOTAL_PAGES = SLIDES.length + 1; // +1 for walk types page
 
+const WALK_TYPE_EXAMPLES: Record<WalkType, { title: string; keyPoints: string[]; duration: string }> = {
+  vent: {
+    title:     'The meeting that drained me',
+    keyPoints: [
+      "I feel dismissed when my input isn't acknowledged in group settings",
+      'The frustration is about respect, not the actual topic',
+    ],
+    duration: '22m',
+  },
+  brainstorm: {
+    title:     'App ideas from this walk',
+    keyPoints: [
+      'A habit tracker that unlocks features based on usage streaks could hook power users',
+      'Integrating with health data to surface prompts automatically is worth exploring',
+    ],
+    duration: '31m',
+  },
+  plan: {
+    title:     'Launch prep this week',
+    keyPoints: [
+      'Send beta invites by Thursday before the weekend window closes',
+      'Write the App Store description tonight while the framing is fresh',
+    ],
+    duration: '18m',
+  },
+  reflect: {
+    title:     'A year since I left that job',
+    keyPoints: [
+      "Leaving wasn't running away — it was making room for something better",
+      "I've stopped measuring growth by title and started measuring by energy",
+    ],
+    duration: '27m',
+  },
+  appreciate: {
+    title:     "What's actually going well",
+    keyPoints: [
+      'The morning light through the trees on this route made me genuinely slow down',
+      'Three people showed up for me this week without being asked',
+    ],
+    duration: '15m',
+  },
+  untangle: {
+    title:     'Stay or go — thinking it through',
+    keyPoints: [
+      "The real question isn't the role, it's whether I trust the direction",
+      "My hesitation isn't fear of change — it's a signal worth respecting",
+    ],
+    duration: '34m',
+  },
+};
+
 function WalkTypesPage() {
+  const [selectedType, setSelectedType] = useState<WalkType | null>(null);
+
   return (
     <View style={[styles.slide, typePageStyles.slide]}>
       <Text style={styles.title}>walk types</Text>
       <Text style={styles.body}>Choose a mode — AI shapes your summary to match.</Text>
+      <Text style={typePageStyles.hint}>tap any to see an example</Text>
       <View style={typePageStyles.grid}>
         {VALID_WALK_TYPES.map(type => (
-          <View key={type} style={typePageStyles.card}>
+          <Pressable
+            key={type}
+            style={({ pressed }) => [typePageStyles.card, pressed && { opacity: 0.7 }]}
+            onPress={() => setSelectedType(type)}
+          >
             <Text style={typePageStyles.cardLabel}>{WALK_TYPE_LABELS[type]}</Text>
             <Text style={typePageStyles.cardDesc}>{WALK_TYPE_DESCRIPTIONS[type]}</Text>
-          </View>
+          </Pressable>
         ))}
       </View>
+      <WalkTypePreviewSheet type={selectedType} onClose={() => setSelectedType(null)} />
     </View>
+  );
+}
+
+function WalkTypePreviewSheet({ type, onClose }: { type: WalkType | null; onClose: () => void }) {
+  const ex = type ? WALK_TYPE_EXAMPLES[type] : null;
+
+  return (
+    <Modal
+      visible={!!type}
+      transparent
+      animationType="slide"
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
+      <Pressable style={sheetStyles.backdrop} onPress={onClose}>
+        <Pressable style={sheetStyles.sheet} onPress={() => {}}>
+          <View style={sheetStyles.handle} />
+          {type && ex && (
+            <>
+              <Text style={sheetStyles.eyebrow}>example output</Text>
+              <View style={sheetStyles.card}>
+                <View style={sheetStyles.topRow}>
+                  <Text style={sheetStyles.cardTitle} numberOfLines={1}>{ex.title}</Text>
+                  <Text style={sheetStyles.cardDuration}>{ex.duration}</Text>
+                </View>
+                <Text style={sheetStyles.cardDate}>Today · {WALK_TYPE_LABELS[type]}</Text>
+                {ex.keyPoints.map((kp, i) => (
+                  <View key={i} style={sheetStyles.bullet}>
+                    <Text style={sheetStyles.bulletDot}>·</Text>
+                    <Text style={sheetStyles.bulletText}>{kp}</Text>
+                  </View>
+                ))}
+                <View style={sheetStyles.badge}>
+                  <Text style={sheetStyles.badgeText}>{WALK_TYPE_LABELS[type]}</Text>
+                </View>
+              </View>
+            </>
+          )}
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 }
 
@@ -92,6 +193,100 @@ const typePageStyles = StyleSheet.create({
     fontSize:   12,
     color:      C.textSecondary,
     lineHeight: 17,
+  },
+  hint: {
+    fontSize:  13,
+    color:     C.textTertiary,
+    textAlign: 'center',
+    marginTop: -8,
+  },
+});
+
+const sheetStyles = StyleSheet.create({
+  backdrop: {
+    flex:            1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent:  'flex-end',
+  },
+  sheet: {
+    backgroundColor:      C.surface,
+    borderTopLeftRadius:  20,
+    borderTopRightRadius: 20,
+    padding:              24,
+    paddingBottom:        48,
+    gap:                  14,
+  },
+  handle: {
+    width:           36,
+    height:          4,
+    borderRadius:    2,
+    backgroundColor: C.textTertiary,
+    alignSelf:       'center',
+    marginBottom:    4,
+  },
+  eyebrow: {
+    fontSize:      11,
+    fontWeight:    '600',
+    letterSpacing: 1.2,
+    color:         C.textTertiary,
+    textTransform: 'uppercase',
+  },
+  card: {
+    backgroundColor: C.surfaceHigh,
+    borderRadius:    14,
+    padding:         16,
+    gap:              8,
+  },
+  topRow: {
+    flexDirection:  'row',
+    justifyContent: 'space-between',
+    alignItems:     'center',
+  },
+  cardTitle: {
+    flex:       1,
+    fontSize:   16,
+    fontWeight: '600',
+    color:      C.text,
+  },
+  cardDuration: {
+    fontSize:   13,
+    color:      C.textSecondary,
+    marginLeft: 8,
+  },
+  cardDate: {
+    fontSize:  13,
+    color:     C.textSecondary,
+    marginTop: -4,
+  },
+  bullet: {
+    flexDirection: 'row',
+    gap:            8,
+    alignItems:    'flex-start',
+  },
+  bulletDot: {
+    color:      C.tint,
+    fontSize:   16,
+    lineHeight: 20,
+    marginTop:  1,
+  },
+  bulletText: {
+    flex:       1,
+    fontSize:   14,
+    color:      C.textSecondary,
+    lineHeight: 20,
+  },
+  badge: {
+    alignSelf:         'flex-start',
+    backgroundColor:   C.surface,
+    borderRadius:      20,
+    paddingHorizontal: 10,
+    paddingVertical:    4,
+    marginTop:          4,
+  },
+  badgeText: {
+    fontSize:   12,
+    fontWeight: '500',
+    color:      C.textSecondary,
   },
 });
 

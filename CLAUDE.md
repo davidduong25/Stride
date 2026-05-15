@@ -2,7 +2,7 @@
 
 ## Current Version
 
-`1.2.2` — last pushed version. Only bump `version` in `app.json` when doing an EAS build, not for OTA-only pushes.
+`1.3.1` — last pushed version. Only bump `version` in `app.json` when doing an EAS build, not for OTA-only pushes.
 
 ## Edit Log
 
@@ -31,6 +31,17 @@
 | 1.2.0 | 2026-05-10 | Replace Moonshine STT with Apple on-device speech recognition (expo-speech-recognition): removes ExecuTorch GPU context contention that caused runAsync crashes; eliminates ~100MB model download; removes WAV/CAF PCM decoding code |
 | 1.2.1 | 2026-05-11 | Real-time transcription: STT runs live during recording (continuous mic, not file-based); transcript saved on stop; live 5-word fade display during recording; remove post-recording transcription queue |
 | 1.2.2 | 2026-05-11 | Switch LLM back to Llama 3.2 1B SPINQUANT: all _QUANTIZED models in rn-executorch use 8da4w format which is incompatible with ExecuTorch 0.4.10 on A14; SPINQUANT is A14-compatible and fits without Moonshine |
+| 1.2.3 | 2026-05-11 | Fix summaries: capture streamed tokens in generate().catch() before discarding — runAsync rejects after generation, not before; add Sentry logging for recovery vs total failure |
+| 1.2.4 | 2026-05-11 | Restore LLM walk-type classification: ClassifyJob runs before user confirms type, replacing broken keyword matcher; fix .catch() to defer token capture via setTimeout so React state flushes first |
+| 1.2.5 | 2026-05-11 | Fix summaries not generating: merge ClassifyWorker+AnalyzeWorker into single LLMWorker; 30s keep-alive after classify holds model loaded so user confirmation triggers analyze without releaseResources()/loadLLM() reload |
+| 1.2.6 | 2026-05-11 | Switch analyze prompt to line-tag format; cap transcript to 1200 chars |
+| 1.2.7 | 2026-05-11 | Ultra-short prompts; cap transcript to 300 chars to rule out context overflow |
+| 1.2.8 | 2026-05-11 | Remove LLM classify: use keyword classifyTranscript() for inferredType; analyze runs as first LLM call on clean KV cache |
+| 1.2.9 | 2026-05-11 | Rewrite LLMWorker → LLMAnalyzer using configure()+sendMessage() (official pattern); remove keepAlive/classify machinery; surface AI error message in walk-summary UI |
+| 1.3.0 | 2026-05-11 | Fix Jinja trim error: replace LLAMA3_2_TOKENIZER_CONFIG URL with inline object so ResourceFetcher.handleObject() writes it locally, bypassing cached/corrupted remote tokenizer_config.json |
+| 1.3.1 | 2026-05-14 | Fix runAsync crash: keep LLMAnalyzer always mounted after preload (no unmount+reload cycle); model loads once and stays ready for inference without a second loadLLM() call |
+| 1.2.6 | 2026-05-11 | Fix analyze output: replace JSON prompt format with simple line-tagged format (TITLE:/SUMMARY:/POINT:/ACTION:) — Llama 3.2 1B generates preamble before JSON making it unparseable; add 1200-char transcript cap |
+| 1.2.7 | 2026-05-11 | Fix analyze prefill crash: shrink system prompts + cut transcript cap to 300 chars (~100 total input tokens) — 3-second flash with no output indicates ExecuTorch failing in prefill phase before first decode token |
 
 > **Convention:** After every push (OTA or EAS), bump `APP_VERSION` in `constants/version.ts` and add a row here. Also bump `version` in `app.json` only for EAS builds. Keep entries short — one line per version.
 

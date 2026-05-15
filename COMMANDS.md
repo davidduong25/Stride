@@ -7,6 +7,8 @@ eas update --channel preview --platform ios
 ```
 Users get it silently on next app launch.
 
+⚠️ Do NOT bump `version` in `app.json` for OTA-only pushes. With the fingerprint runtimeVersion policy, changing `version` shifts the fingerprint hash — the update will be published but silently skipped by every installed device because the runtime versions won't match. Only bump `version` when doing a new `eas build`.
+
 ## New Build (native layer changed, or first time on a device)
 ```
 eas build --profile preview --platform ios

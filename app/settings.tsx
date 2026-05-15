@@ -152,7 +152,7 @@ export default function SettingsScreen() {
   const router = useRouter();
   const { recordings, clearAllRecordings } = useRecordingsContext();
   const { sessions, clearAllSessions }     = useSessionsContext();
-  const { resetQueue }                     = useAIQueue();
+  const { resetQueue, startModelDownload } = useAIQueue();
 
   const [testMode, setTestMode]       = useState(false);
   const [lastBackup, setLastBackup]   = useState<number | null>(null);
@@ -190,7 +190,8 @@ export default function SettingsScreen() {
           onPress: async () => {
             try {
               await deleteAsync(RNE_DIRECTORY, { idempotent: true });
-              Alert.alert('Cache cleared', 'AI models will re-download on next use.');
+              startModelDownload();
+              Alert.alert('Cache cleared', 'AI models are re-downloading now.');
             } catch {
               Alert.alert('Failed', 'Could not clear model cache. Try again.');
             }

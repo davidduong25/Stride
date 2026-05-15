@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useMemo, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Dimensions,
@@ -25,7 +25,7 @@ import { WaveformScrubber } from '@/components/WaveformScrubber';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useRecordingsContext, type RecordingEntry } from '@/context/recordings-context';
 import { useSessionsContext } from '@/context/sessions-context';
-import { useAIQueue, type WalkType, VALID_WALK_TYPES, WALK_TYPE_LABELS, WALK_TYPE_DESCRIPTIONS } from '@/context/ai-queue-context';
+import { useAIQueue, classifyTranscript, type WalkType, VALID_WALK_TYPES, WALK_TYPE_LABELS, WALK_TYPE_DESCRIPTIONS } from '@/context/ai-queue-context';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1236,6 +1236,7 @@ export default function WalkSummaryScreen() {
     cancelAnalysis,
     analyzingSessionId,
     llmDownloadProgress,
+    modelError,
   } = useAIQueue();
 
   const startedAt    = Number(startedAtStr ?? 0);
@@ -1270,8 +1271,12 @@ export default function WalkSummaryScreen() {
     return sum + words.length;
   }, 0);
 
-  // Derive inferred walk type from recording tags (persisted to SQLite)
-  const inferredType = dominantWalkType(sessionRecordings.map(r => r.tags));
+  // Derive inferred walk type from recording tags (persisted to SQLite), falling back to keyword classifier
+  const inferredType = useMemo(
+    () => dominantWalkType(sessionRecordings.map(r => r.tags))
+       ?? classifyTranscript(sessionRecordings.map(r => r.transcript ?? '').join(' ')),
+    [sessionRecordings],
+  );
 
   // ── Confirmation / re-summarize state ──────────────────────────────────────
 
@@ -1282,20 +1287,10 @@ export default function WalkSummaryScreen() {
   const [cancelling, setCancelling]              = useState(false);
   const [showReminders, setShowReminders]        = useState(false);
   const [showShareSheet, setShowShareSheet]      = useState(false);
-  const [classifying, setClassifying]            = useState(false);
-  const classifiedRef                            = useRef(false);
 
   useEffect(() => {
     if (!isAnalyzing) setCancelling(false);
   }, [isAnalyzing]);
-
-  useEffect(() => {
-    if (!allTranscribed || hasAI || totalWordCount < 5 || classifiedRef.current) return;
-    classifiedRef.current = true;
-    setClassifying(true);
-    const t = setTimeout(() => setClassifying(false), 1200);
-    return () => clearTimeout(t);
-  }, [allTranscribed, hasAI, totalWordCount]);
 
   // Active type for confirmation card: local override → previously confirmed → inferred
   const confirmedType = session?.walk_type as WalkType | null ?? null;
@@ -1556,7 +1551,6 @@ export default function WalkSummaryScreen() {
 
   const showConfirmCard =
     allTranscribed &&
-    !classifying &&
     !isAnalyzing &&
     !hasAI &&
     totalWordCount >= 5 &&
@@ -1618,15 +1612,6 @@ export default function WalkSummaryScreen() {
 
           {/* ── Processing states ──────────────────────────────────────────── */}
 
-          {classifying && (
-            <View style={styles.processingCard}>
-              <View style={styles.processingRow}>
-                <IconSymbol name="sparkles" size={13} color={C.tint} />
-                <Text style={styles.processingText}>Deriving walk type…</Text>
-              </View>
-            </View>
-          )}
-
           {(isAnalyzing || cancelling) && (
             <View style={styles.processingCard}>
               <View style={styles.processingRow}>
@@ -1659,6 +1644,14 @@ export default function WalkSummaryScreen() {
                   ]}
                 />
               </View>
+            </View>
+          )}
+
+          {modelError && !isAnalyzing && (
+            <View style={[styles.processingCard, { borderWidth: 1, borderColor: C.red }]}>
+              <Text style={[styles.processingText, { color: C.red }]}>
+                AI error: {modelError}
+              </Text>
             </View>
           )}
 

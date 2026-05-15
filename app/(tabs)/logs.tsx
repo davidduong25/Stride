@@ -104,7 +104,7 @@ function SessionCard({
   onShare,
 }: CardProps) {
   const keyPoints = parseJsonArray(session.key_points);
-  const hasAI     = session.title !== null;
+  const hasAI     = session.title !== null || session.summary !== null || session.key_points !== null || session.actions !== null;
   const preview   = keyPoints[0] ?? null;
 
   return (
@@ -118,7 +118,7 @@ function SessionCard({
       </View>
 
       {/* Date sub-label — only shown when AI title is present */}
-      {hasAI && (
+      {hasAI && session.title !== null && (
         <Text style={cardStyles.dateLabel}>
           {formatDateLabel(session.started_at)}
         </Text>
@@ -264,8 +264,8 @@ const cardStyles = StyleSheet.create({
 
 export default function LogsScreen() {
   const router                      = useRouter();
-  const { sessions, deleteSession } = useSessionsContext();
-  const { recordings }              = useRecordingsContext();
+  const { sessions, deleteSession }          = useSessionsContext();
+  const { recordings, deleteRecording }      = useRecordingsContext();
   const { analyzingSessionId }      = useAIQueue();
 
   const [sortBy, setSortBy]           = useState<SortOption>('recent');
@@ -466,9 +466,13 @@ export default function LogsScreen() {
             const renderDelete = () => (
               <Pressable
                 style={styles.deleteAction}
-                onPress={() => {
+                onPress={async () => {
                   swipeableRefs.current.get(session.id)?.close();
-                  deleteSession(session.id);
+                  await deleteSession(session.id);
+                  const recIds = session.recording_ids
+                    ? session.recording_ids.split(',').filter(Boolean)
+                    : recs.map(r => r.id);
+                  for (const id of recIds) await deleteRecording(id);
                 }}
               >
                 <IconSymbol name="trash.fill" size={20} color={C.text} />

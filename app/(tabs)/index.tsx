@@ -138,10 +138,6 @@ export default function HomeScreen() {
     });
   }, []));
 
-  // Pre-warm speech recognition permissions
-  useEffect(() => {
-    ExpoSpeechRecognitionModule.requestPermissionsAsync();
-  }, []);
 
   // ── Real-time STT event handlers ─────────────────────────────────────────
 
@@ -437,22 +433,25 @@ export default function HomeScreen() {
             {displayState === 'ready' && (
               <Pressable
                 style={styles.recordButton}
-                onPress={() => {
+                onPress={async () => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  const { granted } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
                   if (!isSessionActive) beginSession(stepCountRef.current);
                   startRecording();
                   accumulatedTranscriptRef.current = '';
                   sttEndPromiseRef.current = new Promise<void>(resolve => {
                     sttEndResolveRef.current = resolve;
                   });
-                  sttActiveRef.current = true;
-                  ExpoSpeechRecognitionModule.start({
-                    lang: 'en-US',
-                    interimResults: true,
-                    continuous: true,
-                    requiresOnDeviceRecognition: true,
-                    addsPunctuation: true,
-                  });
+                  sttActiveRef.current = granted;
+                  if (granted) {
+                    ExpoSpeechRecognitionModule.start({
+                      lang: 'en-US',
+                      interimResults: true,
+                      continuous: true,
+                      requiresOnDeviceRecognition: true,
+                      addsPunctuation: true,
+                    });
+                  }
                 }}
               >
                 <Text style={styles.recordButtonText}>record</Text>

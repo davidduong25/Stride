@@ -12,12 +12,38 @@ import {
   useLLM,
   LLAMA3_2_1B_SPINQUANT,
   LLAMA3_2_TOKENIZER,
-  LLAMA3_2_TOKENIZER_CONFIG,
 } from 'react-native-executorch';
+import * as Sentry from '@sentry/react-native';
 
 const LLM_MODEL_SOURCE     = LLAMA3_2_1B_SPINQUANT;
 const LLM_TOKENIZER_SOURCE = LLAMA3_2_TOKENIZER;
-const LLM_TOKENIZER_CONFIG = LLAMA3_2_TOKENIZER_CONFIG;
+
+// Inline tokenizer config so ResourceFetcher.handleObject() writes it locally,
+// bypassing the cached remote file. Template is the official Llama 3.2 format
+// without |trim (which fails on-device with "Cannot apply filter 'trim' to
+// type: UndefinedValue" — root cause unknown but reproducible).
+const LLM_TOKENIZER_CONFIG = {
+  bos_token: '<|begin_of_text|>',
+  eos_token: '<|eot_id|>',
+  chat_template:
+    "{{- bos_token }}" +
+    "{%- if messages[0]['role'] == 'system' %}" +
+    "{%- set system_message = messages[0]['content'] %}" +
+    "{%- set messages = messages[1:] %}" +
+    "{%- else %}" +
+    "{%- set system_message = '' %}" +
+    "{%- endif %}" +
+    "<|start_header_id|>system<|end_header_id|>\n\n" +
+    "Cutting Knowledge Date: December 2023\n\n" +
+    "{{ system_message }}<|eot_id|>" +
+    "{%- for message in messages %}" +
+    "<|start_header_id|>{{ message['role'] }}<|end_header_id|>\n\n" +
+    "{{ message['content'] }}<|eot_id|>" +
+    "{%- endfor %}" +
+    "{%- if add_generation_prompt %}" +
+    "<|start_header_id|>assistant<|end_header_id|>\n\n" +
+    "{%- endif %}",
+};
 
 import { useSessionsContext } from './sessions-context';
 
@@ -25,8 +51,9 @@ import { useSessionsContext } from './sessions-context';
 // Types
 // ---------------------------------------------------------------------------
 
-export type AnalyzeJob = { type: 'analyze'; recordingId: string; sessionId: string; transcripts: string[]; walkType: WalkType };
-export type AIJob      = AnalyzeJob;
+export type ClassifyJob = { type: 'classify'; recordingId: string; sessionId: string; recordingIds: string[]; transcripts: string[] };
+export type AnalyzeJob  = { type: 'analyze';  recordingId: string; sessionId: string; transcripts: string[]; walkType: WalkType };
+export type AIJob       = ClassifyJob | AnalyzeJob;
 
 type QueueState = { active: AIJob | null; pending: AIJob[] };
 type QueueAction =
@@ -135,77 +162,168 @@ export function classifyTranscript(transcript: string): WalkType | null {
 }
 
 // ---------------------------------------------------------------------------
+// Classification
+// ---------------------------------------------------------------------------
+
+const CLASSIFY_SYSTEM_PROMPT =
+  'You are a walk journal classifier. Given a voice transcript, output exactly one word ' +
+  'that best describes the walk type. Choose only from: vent, brainstorm, plan, reflect, ' +
+  'appreciate, untangle. Output the single word only, nothing else.';
+
+function parseWalkType(response: string): WalkType | null {
+  const words = response.toLowerCase().trim().split(/\s+/);
+  for (const word of words) {
+    if ((VALID_WALK_TYPES as readonly string[]).includes(word)) return word as WalkType;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Analysis prompts — one per walk type
 // ---------------------------------------------------------------------------
 
 const ANALYZE_PROMPTS: Record<WalkType, string> = {
-  vent:
-    'You are a compassionate listener. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
-    'Format: {"title":"5-word title","summary":"2-3 sentences reflecting their core feeling. No advice.","key_points":[],"actions":[]}\n' +
-    'Rules: title max 5 words. summary captures the emotion expressed, not advice or next steps.',
-
-  brainstorm:
-    'You are an idea organizer. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
-    'Format: {"title":"5-word title","key_points":["idea 1","idea 2","idea 3"],"summary":null,"actions":[]}\n' +
-    'Rules: title max 5 words. key_points 3-7 distinct ideas. Capture every idea mentioned. Do not filter or evaluate.',
-
-  plan:
-    'You are a task extractor. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
-    'Format: {"title":"5-word title","actions":["Do X","Call Y"],"key_points":[],"summary":null}\n' +
-    'Rules: title max 5 words. actions 1-6 items starting with a verb. Only include explicit tasks or next steps.',
-
-  reflect:
-    'You are a thoughtful journal companion. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
-    'Format: {"title":"5-word title","summary":"2-4 sentences capturing the key insight.","key_points":[],"actions":[]}\n' +
-    'Rules: title max 5 words. summary synthesizes what they processed. No advice or forward projection.',
-
-  appreciate:
-    'You are a grateful observer. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
-    'Format: {"title":"5-word title","key_points":["Grateful for X","Appreciates Y"],"summary":null,"actions":[]}\n' +
-    'Rules: title max 5 words. key_points 2-6 specific things they expressed appreciation for.',
-
-  untangle:
-    'You are a clear-headed advisor. Respond ONLY with a JSON object — no markdown, no explanation.\n' +
-    'Format: {"title":"5-word title","key_points":["Option: X","Option: Y"],"summary":"What they seem to lean toward, or null if unclear.","actions":[]}\n' +
-    'Rules: title max 5 words, names the decision. key_points lists the options. summary is their leaning, not your opinion.',
+  vent:       'Summarise this vent journal entry. Reply:\nTITLE: [5 words]\nSUMMARY: [2 sentences, no advice]',
+  brainstorm: 'Summarise this brainstorm journal. Reply:\nTITLE: [5 words]\nPOINT: [idea]\nPOINT: [idea]\nPOINT: [idea]',
+  plan:       'Summarise this planning journal. Reply:\nTITLE: [5 words]\nACTION: [task]\nACTION: [task]',
+  reflect:    'Summarise this reflection journal. Reply:\nTITLE: [5 words]\nSUMMARY: [2 sentences]',
+  appreciate: 'Summarise this gratitude journal. Reply:\nTITLE: [5 words]\nPOINT: [appreciation]\nPOINT: [appreciation]',
+  untangle:   'Summarise this decision journal. Reply:\nTITLE: [5 words]\nOPTION: [A]\nOPTION: [B]\nLEANING: [leaning]',
 };
 
 type AnalysisResult = { title: string; keyPoints: string[]; actions: string[]; summary: string | null };
 
 function parseAnalysisResponse(response: string): AnalysisResult {
-  const cleaned = response.replace(/```(?:json)?\n?/g, '').trim();
+  const lines      = response.split('\n').map(l => l.trim()).filter(Boolean);
+  let title        = '';
+  const summaryParts: string[] = [];
+  const keyPoints: string[]    = [];
+  const actions: string[]      = [];
 
-  try {
-    const parsed = JSON.parse(cleaned);
-    return {
-      title: typeof parsed.title === 'string' ? parsed.title.trim().slice(0, 60) : '',
-      keyPoints: Array.isArray(parsed.key_points)
-        ? parsed.key_points.filter((s: unknown): s is string => typeof s === 'string')
-        : [],
-      actions: Array.isArray(parsed.actions)
-        ? parsed.actions.filter((s: unknown): s is string => typeof s === 'string')
-        : [],
-      summary: typeof parsed.summary === 'string' ? parsed.summary.trim() : null,
-    };
-  } catch {
-    const titleMatch   = cleaned.match(/"title"\s*:\s*"([^"]+)"/);
-    const keyPointsRaw = cleaned.match(/"key_points"\s*:\s*\[([^\]]*)\]/s);
-    const actionsRaw   = cleaned.match(/"actions"\s*:\s*\[([^\]]*)\]/s);
-    const summaryMatch = cleaned.match(/"summary"\s*:\s*"([^"]+)"/);
-    const extractStrings = (raw: string | undefined): string[] =>
-      raw ? [...raw.matchAll(/"([^"]+)"/g)].map(m => m[1]).filter(Boolean) : [];
-    return {
-      title:     titleMatch?.[1]?.trim() ?? '',
-      keyPoints: extractStrings(keyPointsRaw?.[1]),
-      actions:   extractStrings(actionsRaw?.[1]),
-      summary:   summaryMatch?.[1]?.trim() ?? null,
-    };
+  for (const line of lines) {
+    const u = line.toUpperCase();
+    if      (u.startsWith('TITLE:'))   title = line.slice(6).trim().slice(0, 60);
+    else if (u.startsWith('SUMMARY:')) summaryParts.push(line.slice(8).trim());
+    else if (u.startsWith('LEANING:')) { const v = line.slice(8).trim(); if (v) summaryParts.push(v); }
+    else if (u.startsWith('POINT:'))   { const v = line.slice(6).trim(); if (v) keyPoints.push(v); }
+    else if (u.startsWith('OPTION:'))  { const v = line.slice(7).trim(); if (v) keyPoints.push(v); }
+    else if (u.startsWith('ACTION:'))  { const v = line.slice(7).trim(); if (v) actions.push(v); }
   }
+
+  // Salvage first non-empty line as title if the model skipped the tag
+  if (!title && lines.length > 0) {
+    title = lines[0].replace(/^[A-Z]+:\s*/, '').trim().slice(0, 60);
+  }
+
+  return {
+    title,
+    keyPoints,
+    actions,
+    summary: summaryParts.length > 0 ? summaryParts.join(' ') : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Worker components
+// LLMAnalyzer — minimal wrapper around useLLM following the official pattern:
+// configure() sets the system prompt, sendMessage() runs generation, .finally()
+// captures the result after React flushes the final token state.
 // ---------------------------------------------------------------------------
+
+function LLMAnalyzer({
+  job,
+  onDone,
+  onError,
+  onProgress,
+  onReady,
+}: {
+  job:        AnalyzeJob | null;
+  onDone:     (sessionId: string, response: string, walkType: WalkType) => void;
+  onError:    (err: string) => void;
+  onProgress: (p: number) => void;
+  onReady:    (ready: boolean) => void;
+}) {
+  const {
+    configure, sendMessage, interrupt,
+    isReady, isGenerating, response, downloadProgress,
+  } = useLLM({
+    modelSource:           LLM_MODEL_SOURCE,
+    tokenizerSource:       LLM_TOKENIZER_SOURCE,
+    tokenizerConfigSource: LLM_TOKENIZER_CONFIG,
+  });
+
+  const responseRef = useRef('');
+  responseRef.current = response ?? '';
+
+  const mountedRef       = useRef(true);
+  // Track the last job object processed so the component handles job transitions
+  // without remounting — comparing by reference catches same-sessionId re-summarizes.
+  const processedJobRef  = useRef<AnalyzeJob | null>(null);
+  const doneRef          = useRef(false);
+
+  useEffect(() => () => { mountedRef.current = false; }, []);
+  useEffect(() => { onProgress(downloadProgress); }, [downloadProgress, onProgress]);
+  useEffect(() => { onReady(isReady); }, [isReady, onReady]);
+
+  // 3-min timeout: if a job arrives but inference hasn't started, model failed to load.
+  useEffect(() => {
+    if (!job) return;
+    const t = setTimeout(() => {
+      if (processedJobRef.current !== job && mountedRef.current) {
+        onError('Model failed to load — reset AI queue and try again');
+      }
+    }, 3 * 60_000);
+    return () => clearTimeout(t);
+  }, [job, onError]);
+
+  // 90s generation timeout
+  useEffect(() => {
+    if (!isGenerating) return;
+    const t = setTimeout(() => interrupt(), 90_000);
+    return () => clearTimeout(t);
+  }, [isGenerating, interrupt]);
+
+  // Run inference when the model is ready and a new (unseen) job arrives.
+  // The component stays mounted across jobs, so we compare job identity rather
+  // than relying on mount/unmount to reset state between runs.
+  useEffect(() => {
+    if (!isReady || !job) return;
+    if (processedJobRef.current === job) return;
+    processedJobRef.current = job;
+    doneRef.current = false;
+
+    const sysPrompt = ANALYZE_PROMPTS[job.walkType];
+    let combined = job.transcripts.map((t, i) => `[${i + 1}] ${t}`).join('\n');
+    if (combined.length > 300) combined = combined.slice(0, 300).replace(/\s\S*$/, '') + '…';
+
+    configure({ chatConfig: { systemPrompt: sysPrompt } });
+
+    let sendErr: unknown = null;
+    sendMessage(`Voice notes:\n\n${combined}`)
+      .catch(e => { sendErr = e; })
+      .finally(() => {
+        setTimeout(() => {
+          if (doneRef.current || !mountedRef.current) return;
+          doneRef.current = true;
+          const captured = responseRef.current;
+          Sentry.addBreadcrumb({
+            message: 'LLMAnalyzer.finally',
+            data: { tokens: captured.length, error: sendErr ? String(sendErr) : null },
+          });
+          if (captured.trim()) {
+            onDone(job.sessionId, captured, job.walkType);
+          } else {
+            const msg = sendErr instanceof Error ? sendErr.message
+                      : sendErr ? String(sendErr)
+                      : 'No output generated';
+            Sentry.captureMessage(`LLM analyze failed: ${msg}`, 'error');
+            onError(msg);
+          }
+        }, 0);
+      });
+  }, [isReady, job, configure, sendMessage, onDone, onError]);
+
+  return null;
+}
 
 class AIWorkerErrorBoundary extends React.Component<
   PropsWithChildren<{ onError: (err: string) => void }>,
@@ -220,133 +338,20 @@ class AIWorkerErrorBoundary extends React.Component<
   render() { return this.state.hasError ? null : this.props.children; }
 }
 
-function AnalyzeWorker({
-  job,
-  onDone,
-  onError,
-  onProgress,
-  onReady,
-}: {
-  job: AnalyzeJob | null;
-  onDone: (sessionId: string, response: string, walkType: WalkType) => void;
-  onError: (err: string) => void;
-  onProgress: (p: number) => void;
-  onReady: (ready: boolean) => void;
-}) {
-  const { generate, interrupt, isReady, isGenerating, response, error, downloadProgress } = useLLM({
-    modelSource: LLM_MODEL_SOURCE,
-    tokenizerSource: LLM_TOKENIZER_SOURCE,
-    tokenizerConfigSource: LLM_TOKENIZER_CONFIG,
-  });
-  const startedRef       = useRef(false);
-  const wasGeneratingRef = useRef(false);
-  const pendingIdRef     = useRef<string | null>(null);
-  const calledDoneRef    = useRef(false);
-  const currentJobIdRef  = useRef<string | null>(null);
-  const walkTypeRef      = useRef<WalkType | null>(null);
-  const responseRef      = useRef('');
-  responseRef.current    = response ?? '';
-
-  useEffect(() => {
-    const newId = job?.sessionId ?? null;
-    if (newId === currentJobIdRef.current) return;
-    currentJobIdRef.current = newId;
-    if (newId !== null) {
-      startedRef.current = false;
-      calledDoneRef.current = false;
-      wasGeneratingRef.current = false;
-      pendingIdRef.current = null;
-    }
-  }, [job?.sessionId]);
-
-  useEffect(() => {
-    if (!job) return;
-    const timer = setTimeout(() => {
-      if (!startedRef.current) {
-        onError('LLM model failed to load — reset AI queue and try again');
-      }
-    }, 3 * 60_000);
-    return () => clearTimeout(timer);
-  }, [job?.sessionId, onError]);
-
-  useEffect(() => {
-    onProgress(downloadProgress);
-  }, [downloadProgress, onProgress]);
-
-  useEffect(() => {
-    onReady(isReady);
-  }, [isReady, onReady]);
-
-  useEffect(() => {
-    if (!job && isGenerating) interrupt();
-  }, [job, isGenerating, interrupt]);
-
-  useEffect(() => {
-    if (!isGenerating) return;
-    const timer = setTimeout(() => interrupt(), 90_000);
-    return () => clearTimeout(timer);
-  }, [isGenerating, interrupt]);
-
-  function callDoneOnce(id: string, res: string) {
-    if (calledDoneRef.current) return;
-    calledDoneRef.current = true;
-    onDone(id, res, walkTypeRef.current!);
-  }
-
-  useEffect(() => {
-    if (!isReady || !job || startedRef.current) return;
-    const systemPrompt = ANALYZE_PROMPTS[job.walkType];
-    if (!systemPrompt) {
-      onError(`Unknown walk type: ${job.walkType}`);
-      return;
-    }
-    startedRef.current = true;
-    pendingIdRef.current = job.sessionId;
-    walkTypeRef.current = job.walkType;
-    const userMessage = job.transcripts
-      .map((t, i) => `[${i + 1}]: ${t}`)
-      .join('\n');
-    generate([
-      { role: 'system', content: systemPrompt },
-      { role: 'user',   content: `Analyze these voice notes:\n\n${userMessage}` },
-    ]).catch(e => {
-      pendingIdRef.current = null;
-      startedRef.current = false;
-      wasGeneratingRef.current = false;
-      onError(e instanceof Error ? e.message : String(e));
-    });
-  }, [isReady, generate, job, onError]);
-
-  useEffect(() => {
-    if (isGenerating) { wasGeneratingRef.current = true; return; }
-    if (wasGeneratingRef.current && pendingIdRef.current) {
-      const id = pendingIdRef.current;
-      pendingIdRef.current = null;
-      wasGeneratingRef.current = false;
-      callDoneOnce(id, responseRef.current);
-    }
-  }, [isGenerating, onDone]);
-
-  useEffect(() => {
-    if (!error || !startedRef.current || !job) return;
-    startedRef.current = false;
-    onError(error.message ?? 'LLM generation failed');
-  }, [error, job?.sessionId, onError]);
-
-  return null;
-}
-
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
 
 type AIQueueCtx = {
+  enqueueClassification: (sessionId: string, recordingIds: string[], transcripts: string[]) => void;
   enqueueAnalysis: (sessionId: string, transcripts: string[], walkType: WalkType) => void;
   cancelAnalysis: (sessionId: string) => void;
   resetQueue: () => void;
+  startModelDownload: () => void;
   processingId: string | null;
-  processingType: 'analyze' | null;
+  processingType: 'classify' | 'analyze' | null;
   modelError: string | null;
+  isClassifying: boolean;
   analyzingSessionId: string | null;
   llmDownloadProgress: number;
   isLLMReady: boolean;
@@ -355,51 +360,56 @@ type AIQueueCtx = {
 const AIQueueContext = createContext<AIQueueCtx | null>(null);
 
 export function AIQueueProvider({ children }: PropsWithChildren) {
-  const { updateSession }      = useSessionsContext();
-  const [queue, dispatch]      = useReducer(queueReducer, { active: null, pending: [] });
+  const { updateSession }  = useSessionsContext();
+  const [queue, dispatch]  = useReducer(queueReducer, { active: null, pending: [] });
+
   const [modelError, setModelError]                   = useState<string | null>(null);
   const [llmDownloadProgress, setLlmDownloadProgress] = useState(0);
   const [isLLMReady, setIsLLMReady]                   = useState(false);
   const [llmWorkerKey, setLlmWorkerKey]               = useState(0);
-  const [analyzeWorkerReady, setAnalyzeWorkerReady]   = useState(false);
+  const [preloadLLM, setPreloadLLM]                   = useState(true);
 
-  const dispatchRef           = useRef(dispatch);
-  dispatchRef.current         = dispatch;
-  const cancelledAnalysisRef  = useRef<Set<string>>(new Set());
-  const forcedAdvancedRef     = useRef<Set<string>>(new Set());
-  const mountedRef            = useRef(true);
+  const dispatchRef          = useRef(dispatch);
+  dispatchRef.current        = dispatch;
+  const cancelledRef         = useRef<Set<string>>(new Set());
+  const forcedAdvancedRef    = useRef<Set<string>>(new Set());
+  const mountedRef           = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
-  const activeJobRef          = useRef<AIJob | null>(null);
-  activeJobRef.current        = queue.active;
+  const activeJobRef         = useRef<AIJob | null>(null);
+  activeJobRef.current       = queue.active;
 
-  // 1500ms delay before mounting AnalyzeWorker — safety buffer letting any
-  // in-flight real-time STT session fully release before LLM starts loading.
-  useEffect(() => {
-    if (queue.active?.type !== 'analyze') { setAnalyzeWorkerReady(false); return; }
-    const t = setTimeout(() => setAnalyzeWorkerReady(true), 1500);
-    return () => clearTimeout(t);
-  }, [queue.active?.type]);
+  const llmJobActive = queue.active?.type === 'analyze';
 
   const handleError = useCallback(
     (err: string) => {
       if (!mountedRef.current) return;
       setModelError(err);
+      setPreloadLLM(false);
       const active = activeJobRef.current;
       if (active?.type === 'analyze') {
         updateSession(active.sessionId, { title: null });
-        setLlmWorkerKey(k => k + 1);
-        setIsLLMReady(false);
-        dispatchRef.current({ type: 'NEXT' });
       }
+      setLlmWorkerKey(k => k + 1);
+      setIsLLMReady(false);
+      dispatchRef.current({ type: 'NEXT' });
     },
     [updateSession]
   );
 
-  const handleAnalyzeDone = useCallback(
+  const handleReady = useCallback((ready: boolean) => {
+    setIsLLMReady(ready);
+    // When preload completes with no active job, hide the download progress bar
+    // but keep the model mounted so the next job can run without a second loadLLM().
+    if (ready && !activeJobRef.current) {
+      setLlmDownloadProgress(0);
+    }
+  }, []);
+
+  const handleDone = useCallback(
     async (sessionId: string, response: string, walkType: WalkType) => {
       if (!mountedRef.current) return;
-      if (cancelledAnalysisRef.current.has(sessionId)) {
-        cancelledAnalysisRef.current.delete(sessionId);
+      if (cancelledRef.current.has(sessionId)) {
+        cancelledRef.current.delete(sessionId);
         if (!forcedAdvancedRef.current.has(sessionId)) {
           dispatchRef.current({ type: 'NEXT' });
         }
@@ -422,10 +432,10 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
               content: { title: 'Walk summary ready', body: title },
               trigger: null,
             });
-          } catch { /* native module not available in this build */ }
+          } catch { /* expo-notifications unavailable */ }
         }
       } catch {
-        // DB write failed — Sentry captured inside updateSession; advance queue
+        /* DB write failed; advance queue */
       } finally {
         if (mountedRef.current) dispatchRef.current({ type: 'NEXT' });
       }
@@ -433,12 +443,18 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
     [updateSession]
   );
 
+  function enqueueClassification(sessionId: string, recordingIds: string[], transcripts: string[]) {
+    dispatch({ type: 'PUSH', job: { type: 'classify', recordingId: sessionId, sessionId, recordingIds, transcripts } });
+  }
+
   function enqueueAnalysis(sessionId: string, transcripts: string[], walkType: WalkType) {
+    setModelError(null);
+    setPreloadLLM(true); // Re-mount LLMAnalyzer if it was unmounted after a previous error
     dispatch({ type: 'PUSH', job: { type: 'analyze', recordingId: sessionId, sessionId, transcripts, walkType } });
   }
 
   function cancelAnalysis(sessionId: string) {
-    cancelledAnalysisRef.current.add(sessionId);
+    cancelledRef.current.add(sessionId);
     const active = activeJobRef.current;
     if (active?.type === 'analyze' && active.sessionId === sessionId) {
       forcedAdvancedRef.current.add(sessionId);
@@ -449,7 +465,7 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   function resetQueue() {
     const active = activeJobRef.current;
     if (active?.type === 'analyze') {
-      cancelledAnalysisRef.current.add(active.sessionId);
+      cancelledRef.current.add(active.sessionId);
       forcedAdvancedRef.current.add(active.sessionId);
     }
     dispatch({ type: 'RESET' });
@@ -459,13 +475,21 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
     setLlmDownloadProgress(0);
   }
 
+  function startModelDownload() {
+    setPreloadLLM(true);
+    setModelError(null);
+  }
+
   const value: AIQueueCtx = {
+    enqueueClassification,
     enqueueAnalysis,
     cancelAnalysis,
     resetQueue,
+    startModelDownload,
     processingId:       queue.active?.recordingId ?? null,
     processingType:     queue.active?.type ?? null,
     modelError,
+    isClassifying:      queue.active?.type === 'classify',
     analyzingSessionId: queue.active?.type === 'analyze' ? queue.active.sessionId : null,
     llmDownloadProgress,
     isLLMReady,
@@ -474,14 +498,14 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
   return (
     <AIQueueContext.Provider value={value}>
       {children}
-      {queue.active?.type === 'analyze' && analyzeWorkerReady && (
+      {preloadLLM && (
         <AIWorkerErrorBoundary key={llmWorkerKey} onError={handleError}>
-          <AnalyzeWorker
-            job={queue.active as AnalyzeJob}
-            onDone={handleAnalyzeDone}
+          <LLMAnalyzer
+            job={llmJobActive ? queue.active as AnalyzeJob : null}
+            onDone={handleDone}
             onError={handleError}
             onProgress={setLlmDownloadProgress}
-            onReady={setIsLLMReady}
+            onReady={handleReady}
           />
         </AIWorkerErrorBoundary>
       )}
