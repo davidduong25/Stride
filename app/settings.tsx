@@ -74,6 +74,7 @@ function SettingsGroup({ children }: { children: React.ReactNode }) {
 type RowProps = {
   label:        string;
   value?:       string;
+  valueColor?:  string;
   destructive?: boolean;
   chevron?:     boolean;
   switchValue?: boolean;
@@ -81,7 +82,7 @@ type RowProps = {
   onPress?:     () => void;
 };
 
-function SettingsRow({ label, value, destructive, chevron, switchValue, onSwitch, onPress }: RowProps) {
+function SettingsRow({ label, value, valueColor, destructive, chevron, switchValue, onSwitch, onPress }: RowProps) {
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && onPress && styles.rowPressed]}
@@ -92,7 +93,7 @@ function SettingsRow({ label, value, destructive, chevron, switchValue, onSwitch
         {label}
       </Text>
       {value !== undefined && (
-        <Text style={styles.rowValue}>{value}</Text>
+        <Text style={[styles.rowValue, valueColor ? { color: valueColor } : undefined]}>{value}</Text>
       )}
       {onSwitch !== undefined && (
         <Switch
@@ -152,7 +153,7 @@ export default function SettingsScreen() {
   const router = useRouter();
   const { recordings, clearAllRecordings } = useRecordingsContext();
   const { sessions, clearAllSessions }     = useSessionsContext();
-  const { resetQueue, startModelDownload } = useAIQueue();
+  const { resetQueue, startModelDownload, isLLMReady, llmDownloadProgress, modelError } = useAIQueue();
 
   const [testMode, setTestMode]       = useState(false);
   const [lastBackup, setLastBackup]   = useState<number | null>(null);
@@ -332,6 +333,18 @@ export default function SettingsScreen() {
         {/* Data */}
         <SectionHeader label="DATA" />
         <SettingsGroup>
+          <SettingsRow
+            label="AI model"
+            value={
+              isLLMReady          ? 'Ready' :
+              modelError          ? 'Error — tap to retry' :
+              llmDownloadProgress > 0 ? `Downloading ${Math.round(llmDownloadProgress * 100)}%` :
+                                    'Loading…'
+            }
+            valueColor={isLLMReady ? C.green : modelError ? C.red : undefined}
+            onPress={modelError ? startModelDownload : undefined}
+          />
+          <RowDivider />
           <SettingsRow
             label="Reset AI queue"
             destructive

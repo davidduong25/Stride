@@ -305,9 +305,10 @@ function LLMAnalyzer({
           if (doneRef.current || !mountedRef.current) return;
           doneRef.current = true;
           const captured = responseRef.current;
+          Sentry.captureMessage(`LLM raw output: ${captured.slice(0, 500)}`, 'debug');
           Sentry.addBreadcrumb({
             message: 'LLMAnalyzer.finally',
-            data: { tokens: captured.length, error: sendErr ? String(sendErr) : null },
+            data: { tokens: captured.length, preview: captured.slice(0, 200), error: sendErr ? String(sendErr) : null },
           });
           if (captured.trim()) {
             onDone(job.sessionId, captured, job.walkType);
@@ -417,6 +418,15 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
         return;
       }
       const { title, keyPoints, actions, summary } = parseAnalysisResponse(response);
+      Sentry.addBreadcrumb({
+        message: 'LLM parsed result',
+        data: { title, keyPoints, actions, summary },
+      });
+      if (!title.trim() && keyPoints.length === 0 && actions.length === 0 && !summary) {
+        Sentry.captureMessage(`LLM output unparseable: ${response.slice(0, 300)}`, 'error');
+        onError('AI generated a response but could not produce a summary — try again');
+        return;
+      }
       try {
         await updateSession(sessionId, {
           title:      title.trim() || null,
@@ -434,8 +444,8 @@ export function AIQueueProvider({ children }: PropsWithChildren) {
             });
           } catch { /* expo-notifications unavailable */ }
         }
-      } catch {
-        /* DB write failed; advance queue */
+      } catch (dbErr) {
+        Sentry.captureException(dbErr, { extra: { sessionId, title, keyPoints, actions, summary } });
       } finally {
         if (mountedRef.current) dispatchRef.current({ type: 'NEXT' });
       }
